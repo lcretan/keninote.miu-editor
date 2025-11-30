@@ -1,13 +1,12 @@
-﻿// Source.cpp
+﻿// FastMiniEditor.cpp
 // Minimal, high-performance text editor for huge files using Win32 + DirectWrite.
 // Features: memory-mapped original file, piece table for edits, undo/redo, caret, basic input, fast visible-range rendering.
 // ... (Features list abbreviated for brevity) ...
-// UI Update: Help Popup size/opacity fixed by user.
-// New Feature: Ctrl+Shift+S for "Save As".
+// Build Fix: Removed duplicate definition of openFileFromPath.
 
 // Build (MSVC):
-// rc miu.rc
-// cl /std:c++17 /O2 /EHsc Source.cpp miu.res /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib comctl32.lib
+// rc FastMiniEditor.rc
+// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp FastMiniEditor.res /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib comctl32.lib
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -39,15 +38,15 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "comctl32.lib")
 
 // --- Constants ---
-const std::wstring APP_VERSION = L"miu v1.0.0";
+const std::wstring APP_VERSION = L"FastMiniEditor v1.1";
 const std::wstring HELP_TEXT =
 APP_VERSION + L"\n\n"
 L"[Shortcuts]\n"
 L"F1             Help\n"
-L"Ctrl+N         New\n"
 L"Ctrl+O         Open\n"
 L"Ctrl+S         Save\n"
 L"Ctrl+Shift+S   Save As\n"
+L"Ctrl+N         New\n"
 L"Ctrl+F         Find\n"
 L"Ctrl+H         Replace\n"
 L"F3             Find Next\n"
@@ -57,7 +56,8 @@ L"Ctrl+Y         Redo\n"
 L"Ctrl+X/C/V     Cut/Copy/Paste\n"
 L"Ctrl+A         Select All\n"
 L"Alt+Drag       Rect Select\n"
-L"Ctrl+Wheel     Zoom";
+L"Ctrl+Wheel     Zoom\n"
+L"Drag&Drop      Open File";
 
 // --- UTF helpers ---
 static std::wstring UTF8ToW(const std::string& s) {
@@ -288,7 +288,7 @@ struct Editor {
         if (textFormat) textFormat->Release(); if (dwFactory) dwFactory->Release(); if (rend) rend->Release(); if (d2dFactory) d2dFactory->Release();
     }
     void updateTitleBar() {
-        if (!hwnd) return; std::wstring title = L"miu - "; if (currentFilePath.empty()) title += L"無題"; else title += currentFilePath; if (isDirty) title += L" *"; SetWindowTextW(hwnd, title.c_str());
+        if (!hwnd) return; std::wstring title = L"FastMiniEditor - "; if (currentFilePath.empty()) title += L"Untitled"; else title += currentFilePath; if (isDirty) title += L" *"; SetWindowTextW(hwnd, title.c_str());
     }
     void updateDirtyFlag() { bool newDirty = undo.isModified(); if (isDirty != newDirty) { isDirty = newDirty; updateTitleBar(); } }
     void updateGutterWidth() {
@@ -946,7 +946,7 @@ struct Editor {
         HIMC hIMC = ImmGetContext(hwnd); if (hIMC) { COMPOSITIONFORM cf = {}; cf.dwStyle = CFS_POINT; cf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cf.ptCurrentPos.y = (LONG)imeCy; ImmSetCompositionWindow(hIMC, &cf); CANDIDATEFORM cdf = {}; cdf.dwIndex = 0; cdf.dwStyle = CFS_CANDIDATEPOS; cdf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cdf.ptCurrentPos.y = (LONG)(imeCy + lineHeight); ImmSetCandidateWindow(hIMC, &cdf); ImmReleaseContext(hwnd, hIMC); }
         if (GetTickCount() < zoomPopupEndTime) {
             D2D1_RECT_F popupRect = D2D1::RectF(clientW / 2 - 80, clientH / 2 - 40, clientW / 2 + 80, clientH / 2 + 40);
-            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.5f), &popupBg);
+            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.7f), &popupBg);
             ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
             rend->FillRoundedRectangle(D2D1::RoundedRect(popupRect, 10.0f, 10.0f), popupBg);
             if (popupTextFormat) rend->DrawText(zoomPopupText.c_str(), (UINT32)zoomPopupText.size(), popupTextFormat, popupRect, popupText);
@@ -955,9 +955,9 @@ struct Editor {
 
         // Help Popup (F1)
         if (showHelpPopup) {
-            float helpW = 400.0f; float helpH = 512.0f;
+            float helpW = 500.0f; float helpH = 500.0f;
             D2D1_RECT_F helpRect = D2D1::RectF((clientW - helpW) / 2, (clientH - helpH) / 2, (clientW + helpW) / 2, (clientH + helpH) / 2);
-            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.5f), &popupBg);
+            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.1f, 0.1f, 0.5f), &popupBg);
             ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
             rend->FillRoundedRectangle(D2D1::RoundedRect(helpRect, 10.0f, 10.0f), popupBg);
             // Use specific layout for help if needed, here reusing standard format but could make it left aligned
@@ -988,11 +988,35 @@ struct Editor {
     bool saveFile(const std::wstring& p) { std::wstring t = p + L".tmp"; HANDLE h = CreateFileW(t.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); if (h == INVALID_HANDLE_VALUE)return false; bool ok = true; for (const auto& piece : pt.pieces) { const char* ptr = piece.isOriginal ? (pt.origPtr + piece.start) : (pt.addBuf.data() + piece.start); DWORD w = 0; if (!WriteFile(h, ptr, (DWORD)piece.len, &w, NULL) || w != piece.len) { ok = false; break; } }CloseHandle(h); if (!ok) { DeleteFileW(t.c_str()); return false; }if (MoveFileExW(t.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { DeleteFileW(t.c_str()); return false; }currentFilePath = p; undo.markSaved(); updateDirtyFlag(); return true; }
     bool saveFileAs() { WCHAR f[MAX_PATH] = { 0 }; OPENFILENAMEW o = { 0 }; o.lStructSize = sizeof(o); o.hwndOwner = hwnd; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrFilter = L"All\0*.*\0Text\0*.txt\0"; o.nFilterIndex = 1; o.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT; if (GetSaveFileNameW(&o))return saveFile(f); return false; }
     void newFile() { if (!checkUnsavedChanges())return; pt.initEmpty(); currentFilePath.clear(); undo.clear(); isDirty = false; cursors.clear(); cursors.push_back({ 0,0,0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); }
+    bool openFileFromPath(const std::wstring& path) {
+        fileMap.reset(new MappedFile());
+        if (fileMap->open(path.c_str())) {
+            pt.initFromFile(fileMap->ptr, fileMap->size);
+            currentFilePath = path;
+            undo.clear();
+            isDirty = false;
+            undo.markSaved();
+            cursors.clear();
+            cursors.push_back({ 0, 0, 0.0f });
+            vScrollPos = 0; hScrollPos = 0;
+            rebuildLineStarts();
+            updateTitleBar();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return true;
+        }
+        else {
+            ShowTaskDialog(L"エラー", L"ファイルを開けませんでした。", path.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+    }
 } g_editor;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-    case WM_CREATE: g_editor.initGraphics(hwnd); break;
+    case WM_CREATE:
+        g_editor.initGraphics(hwnd);
+        DragAcceptFiles(hwnd, TRUE); // Enable Drag & Drop
+        break;
     case WM_SIZE: if (g_editor.rend) { RECT rc; GetClientRect(hwnd, &rc); g_editor.rend->Resize(D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)); g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE); } break;
     case WM_LBUTTONDOWN: {
         // Dismiss Help Popup on interaction
@@ -1138,6 +1162,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_editor.mergeCursors(); g_editor.ensureCaretVisible(); InvalidateRect(hwnd, NULL, FALSE);
         }
         break;
+    case WM_DROPFILES: {
+        if (g_editor.checkUnsavedChanges()) {
+            HDROP hDrop = (HDROP)wParam;
+            WCHAR file[MAX_PATH];
+            if (DragQueryFileW(hDrop, 0, file, MAX_PATH) && g_editor.openFileFromPath(file) && g_editor.showHelpPopup) {
+                g_editor.showHelpPopup = false; InvalidateRect(hwnd, NULL, FALSE);
+            }
+            DragFinish(hDrop);
+        }
+    } break;
     case WM_CLOSE: if (g_editor.checkUnsavedChanges()) DestroyWindow(hwnd); return 0;
     case WM_PAINT: g_editor.render(); break;
     case WM_DESTROY: g_editor.destroyGraphics(); PostQuitMessage(0); break;
@@ -1147,22 +1181,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
-    WNDCLASS wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"miu"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
-    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"miu", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
+    WNDCLASS wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
+    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"FastMiniEditor - Minimal", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
     if (!hwnd) return 0; ShowWindow(hwnd, nCmdShow);
 
     // Check startup file
     if (g_editor.currentFilePath.empty()) {
         int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (argc >= 2) {
-            g_editor.fileMap.reset(new MappedFile());
-            if (g_editor.fileMap->open(argv[1])) {
-                g_editor.pt.initFromFile(g_editor.fileMap->ptr, g_editor.fileMap->size);
-                g_editor.currentFilePath = argv[1];
-                g_editor.undo.clear(); g_editor.isDirty = false; g_editor.undo.markSaved();
-                g_editor.cursors.clear(); g_editor.cursors.push_back({ 0, 0, 0.0f });
-                g_editor.rebuildLineStarts(); g_editor.updateTitleBar();
-            }
+            g_editor.openFileFromPath(argv[1]);
         }
         else {
             // No file argument, show help popup on startup
@@ -1187,9 +1214,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
                 g_editor.findNext(!shift);
                 continue;
             }
+            // Global Ctrl+F / Ctrl+H hook
             if (GetKeyState(VK_CONTROL) & 0x8000) {
-                if (msg.wParam == 'F') { g_editor.showFindDialog(false); continue; }
-                if (msg.wParam == 'H') { g_editor.showFindDialog(true); continue; }
+                if (msg.wParam == 'F') {
+                    g_editor.showFindDialog(false);
+                    continue;
+                }
+                if (msg.wParam == 'H') {
+                    g_editor.showFindDialog(true);
+                    continue;
+                }
             }
         }
         // Dismiss help popup on any key (except modifiers if needed, but strict requirement was "key press")
