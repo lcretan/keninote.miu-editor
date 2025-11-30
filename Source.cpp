@@ -28,9 +28,11 @@
 // Rectangular Selection HitTest fixed for Surrogate Pairs (prevents Mojibake).
 // File I/O (Open/Save) features added with Safe Overwrite strategy.
 // New File (Ctrl+N) support added with unsaved changes check.
-// Build Fixed: Restored all missing methods inside Editor struct.
+// Undo/Redo Smart Dirty Flag: Undo to saved state clears dirty flag and asterisk.
+// UI Update: Uses TaskDialog for centered prompts.
+
 // Build (MSVC):
-// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib
+// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib comctl32.lib
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -42,6 +44,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <dwrite.h>
 #include <imm.h> // IME support
 #include <commdlg.h> // Open/Save Dialog
+#include <commctrl.h> // TaskDialog
 #include <string>
 #include <vector>
 #include <memory>
@@ -57,6 +60,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "imm32.lib") // IME lib
 #pragma comment(lib, "comdlg32.lib") // Dialog lib
+#pragma comment(lib, "comctl32.lib") // TaskDialog lib
 
 // --- UTF helpers --------------------------------------------------
 static std::wstring UTF8ToW(const std::string& s) {
@@ -180,7 +184,6 @@ struct PieceTable {
         if (pos > cur) {
             Piece p = pieces[idx];
             size_t leftLen = pos - cur;
-            Piece left = { p.isOriginal, p.start, leftLen };
             Piece leftPiece = { p.isOriginal, p.start, leftLen }; // renamed from left to avoid conflict
             Piece right = { p.isOriginal, p.start + leftLen, p.len - leftLen };
             pieces[idx] = leftPiece;
@@ -244,7 +247,7 @@ struct PieceTable {
 
 // --- Cursor / Selection ---
 struct Cursor {
-    size_t head;   // Current caret position
+    size_t head;    // Current caret position
     size_t anchor; // Selection start
     float desiredX;
 
@@ -271,15 +274,32 @@ struct EditBatch {
 struct UndoManager {
     std::vector<EditBatch> undoStack;
     std::vector<EditBatch> redoStack;
+    int savePoint = 0; // Index in undoStack that matches saved state
 
     void clear() {
         undoStack.clear();
         redoStack.clear();
+        savePoint = 0;
     }
+
+    void markSaved() {
+        savePoint = (int)undoStack.size();
+    }
+
+    bool isModified() const {
+        return (int)undoStack.size() != savePoint;
+    }
+
     void push(const EditBatch& batch) {
+        // If we push a new edit while behind the save point (divergent history),
+        // the old save point is unreachable via Redo.
+        if (savePoint > (int)undoStack.size()) {
+            savePoint = -1; // -1 indicates "unsaved state not reachable in current history"
+        }
         undoStack.push_back(batch);
         redoStack.clear();
     }
+
     bool canUndo() const { return !undoStack.empty(); }
     bool canRedo() const { return !redoStack.empty(); }
     EditBatch popUndo() { EditBatch e = undoStack.back(); undoStack.pop_back(); redoStack.push_back(e); return e; }
@@ -484,6 +504,15 @@ struct Editor {
             title += L" *";
         }
         SetWindowTextW(hwnd, title.c_str());
+    }
+
+    // Helper: update isDirty based on undo stack vs save point
+    void updateDirtyFlag() {
+        bool newDirty = undo.isModified();
+        if (isDirty != newDirty) {
+            isDirty = newDirty;
+            updateTitleBar();
+        }
     }
 
     void updateGutterWidth() {
@@ -828,6 +857,7 @@ struct Editor {
 
         rebuildLineStarts();
         ensureCaretVisible();
+        updateDirtyFlag();
     }
 
     void render() {
@@ -1271,7 +1301,7 @@ struct Editor {
     }
 
     void insertAtCursors(const std::string& text) {
-        commitPadding(); isDirty = true; updateTitleBar();
+        commitPadding();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1293,9 +1323,10 @@ struct Editor {
             for (auto& other : cursors) { if (other.head >= insertionPos) other.head += len; if (other.anchor >= insertionPos) other.anchor += len; }
         }
         batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible();
+        updateDirtyFlag();
     }
     void deleteForwardAtCursors() {
-        commitPadding(); isDirty = true; updateTitleBar();
+        commitPadding();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1334,9 +1365,10 @@ struct Editor {
         undo.push(batch);
         rebuildLineStarts();
         ensureCaretVisible();
+        updateDirtyFlag();
     }
     void backspaceAtCursors() {
-        commitPadding(); isDirty = true; updateTitleBar();
+        commitPadding();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1361,6 +1393,7 @@ struct Editor {
             }
         }
         batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible();
+        updateDirtyFlag();
     }
     void copyToClipboard() {
         std::string text = "";
@@ -1419,6 +1452,7 @@ struct Editor {
             else pt.insert(op.pos, op.text);
         }
         cursors = b.beforeCursors; rebuildLineStarts(); ensureCaretVisible();
+        updateDirtyFlag();
     }
     void performRedo() {
         if (!undo.canRedo()) return;
@@ -1428,49 +1462,103 @@ struct Editor {
             else pt.erase(op.pos, op.text.size());
         }
         cursors = b.afterCursors; rebuildLineStarts(); ensureCaretVisible();
+        updateDirtyFlag();
     }
+
+    // Helper to show TaskDialog
+    int ShowTaskDialog(const wchar_t* title, const wchar_t* instruction, const wchar_t* content, TASKDIALOG_COMMON_BUTTON_FLAGS buttons, PCWSTR icon) {
+        TASKDIALOGCONFIG config = { 0 };
+        config.cbSize = sizeof(config);
+        config.hwndParent = hwnd;
+        config.hInstance = GetModuleHandle(NULL);
+        config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        config.pszWindowTitle = title;
+        config.pszMainInstruction = instruction;
+        config.pszContent = content;
+        config.dwCommonButtons = buttons;
+        config.pszMainIcon = icon;
+
+        int nButtonPressed = 0;
+        TaskDialogIndirect(&config, &nButtonPressed, NULL, NULL);
+        return nButtonPressed;
+    }
+
     bool checkUnsavedChanges() {
         if (!isDirty) return true;
-        int result = MessageBoxW(hwnd, L"変更を保存しますか?", L"確認", MB_YESNOCANCEL | MB_ICONQUESTION);
+
+        // MessageBoxW -> ShowTaskDialog
+        int result = ShowTaskDialog(L"確認", L"変更を保存しますか?",
+            currentFilePath.empty() ? L"無題のファイルへの変更内容を保存しますか?" : (L"ファイル '" + currentFilePath + L"' への変更内容を保存しますか?").c_str(),
+            TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON,
+            TD_WARNING_ICON);
+
         if (result == IDCANCEL) return false;
-        if (result == IDYES) { if (currentFilePath.empty()) return saveFileAs(); else return saveFile(currentFilePath); }
-        return true;
+        if (result == IDYES) {
+            if (currentFilePath.empty()) return saveFileAs();
+            else return saveFile(currentFilePath);
+        }
+        return true; // IDNOの場合は保存せずに進む
     }
+
     bool openFile() {
         if (!checkUnsavedChanges()) return false;
         WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
         if (GetOpenFileNameW(&ofn) == TRUE) {
             fileMap.reset(new MappedFile());
             if (fileMap->open(szFile)) {
-                pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = szFile; isDirty = false; undo.clear();
+                pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = szFile;
+                undo.clear();
+                isDirty = false;
+                undo.markSaved();
                 cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0;
                 rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); return true;
             }
-            else { MessageBoxW(hwnd, L"ファイルを開けませんでした。", L"エラー", MB_OK | MB_ICONERROR); }
+            else {
+                ShowTaskDialog(L"エラー", L"ファイルを開けませんでした。", szFile, TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            }
         }
         return false;
     }
+
     bool saveFile(const std::wstring& path) {
         std::wstring tempPath = path + L".tmp";
         HANDLE hTemp = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hTemp == INVALID_HANDLE_VALUE) { MessageBoxW(hwnd, L"一時ファイルを作成できませんでした。", L"エラー", MB_OK | MB_ICONERROR); return false; }
+        if (hTemp == INVALID_HANDLE_VALUE) {
+            ShowTaskDialog(L"エラー", L"一時ファイルを作成できませんでした。", tempPath.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
         bool success = true;
         for (const auto& p : pt.pieces) {
             const char* dataPtr = p.isOriginal ? (pt.origPtr + p.start) : (pt.addBuf.data() + p.start);
             DWORD written = 0; if (!WriteFile(hTemp, dataPtr, (DWORD)p.len, &written, NULL) || written != p.len) { success = false; break; }
         }
         CloseHandle(hTemp);
-        if (!success) { DeleteFileW(tempPath.c_str()); MessageBoxW(hwnd, L"書き込みに失敗しました。", L"エラー", MB_OK | MB_ICONERROR); return false; }
-        if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { MessageBoxW(hwnd, L"ファイルを上書きできませんでした（ロックされています）。", L"エラー", MB_OK | MB_ICONERROR); DeleteFileW(tempPath.c_str()); return false; }
-        currentFilePath = path; isDirty = false; updateTitleBar(); return true;
+        if (!success) {
+            DeleteFileW(tempPath.c_str());
+            ShowTaskDialog(L"エラー", L"書き込みに失敗しました。", path.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+        if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) {
+            ShowTaskDialog(L"エラー", L"ファイルを上書きできませんでした。", L"ファイルが他のプロセスによってロックされている可能性があります。", TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            DeleteFileW(tempPath.c_str());
+            return false;
+        }
+        currentFilePath = path;
+        undo.markSaved();
+        updateDirtyFlag();
+        return true;
     }
+
     bool saveFileAs() {
         WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
         if (GetSaveFileNameW(&ofn) == TRUE) return saveFile(szFile); return false;
     }
     void newFile() {
         if (!checkUnsavedChanges()) return;
-        pt.initEmpty(); currentFilePath.clear(); isDirty = false; undo.clear(); cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE);
+        pt.initEmpty(); currentFilePath.clear();
+        undo.clear();
+        isDirty = false;
+        cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE);
     }
 } g_editor;
 
@@ -1685,18 +1773,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     if (!hwnd) return 0;
     ShowWindow(hwnd, nCmdShow);
 
-    // Initialize with file or empty
-    g_editor.initGraphics(hwnd); // Init graphics context first (needed for metrics)
+    // FIX: initGraphics is already called in WM_CREATE, so we remove the duplicate call here to prevent double cursors.
 
-    // To properly init, we need to clear the initial empty buffer set by initGraphics
     if (filePath) {
         // Manually open
         g_editor.fileMap.reset(new MappedFile());
         if (g_editor.fileMap->open(filePath)) {
             g_editor.pt.initFromFile(g_editor.fileMap->ptr, g_editor.fileMap->size);
             g_editor.currentFilePath = filePath;
-            g_editor.isDirty = false;
+
             g_editor.undo.clear();
+            g_editor.isDirty = false;
+            g_editor.undo.markSaved(); // Mark as saved state
+
             g_editor.cursors.clear(); g_editor.cursors.push_back({ 0, 0, 0.0f });
             g_editor.rebuildLineStarts();
             g_editor.updateTitleBar();
