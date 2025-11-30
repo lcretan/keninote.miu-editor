@@ -18,9 +18,14 @@
 // File Start/End Navigation (Ctrl+Home/End) fixed.
 // IME Composition Dotted Underline fixed (HitTest UTF-16 indexing).
 // Newline Selection Visualization fixed (Aligned with text metrics).
-// Selection Rendering: Combined single polygon for seamless rounded corners (concave & convex).
+// Selection Rendering: Overlap adjustment for smooth join & Increased vertical inset.
+// Mouse Drag tracking fixed: Separation of Text-Move-Drag and Selection-Drag.
+// Clipboard (Cut/Copy/Paste) & Delete Key support added.
+// Drag & Drop Text Move support added (Internal).
+// Horizontal Scrollbar visibility fixed (Dynamic content width calculation).
 // Font Scaling (Ctrl+Wheel) & Zoom Overlay added.
-// Selection Rect alignment fixed (Robust line index calculation with rounding).
+// Visual Cursor Movement for Grapheme Clusters (Emoji support) restored.
+// Rectangular Selection HitTest fixed for Surrogate Pairs (prevents Mojibake).
 // Build (MSVC):
 // cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib
 
@@ -523,7 +528,9 @@ struct Editor {
             DWRITE_HIT_TEST_METRICS m;
             layout->HitTestPoint(targetX, 1.0f, &isTrailing, &isInside, &m);
             size_t local = m.textPosition;
-            if (isTrailing) local++;
+            if (isTrailing) {
+                local += m.length; // Fixed: Advance by grapheme cluster length
+            }
 
             bool hasNewline = (!wLine.empty() && wLine.back() == L'\n');
             if (hasNewline) {
@@ -656,7 +663,9 @@ struct Editor {
             layout->HitTestPoint(virtualX, virtualY, &isTrailing, &isInside, &metrics);
 
             UINT32 utf16Index = metrics.textPosition;
-            if (isTrailing) utf16Index++;
+            if (isTrailing) {
+                utf16Index += metrics.length; // Correctly advance by cluster length
+            }
 
             if (utf16Index > wtext.size()) utf16Index = (UINT32)wtext.size();
             std::wstring wsub = wtext.substr(0, utf16Index);
@@ -739,6 +748,100 @@ struct Editor {
             size_t hd = getPosFromLineAndX(i, targetHeadX);
             cursors.push_back({ hd, anc, targetHeadX });
         }
+    }
+
+    // Helper to move caret visually considering grapheme clusters (using DirectWrite clusters)
+    size_t moveCaretVisual(size_t pos, bool forward) {
+        size_t len = pt.length();
+        if (pos == 0 && !forward) return 0;
+        if (pos >= len && forward) return len;
+
+        // Check newline - simple logic
+        char c = pt.charAt(pos);
+        if (forward) {
+            if (c == '\n') return pos + 1;
+        }
+        else {
+            if (pos > 0 && pt.charAt(pos - 1) == '\n') return pos - 1;
+        }
+
+        // Get Line
+        int lineIdx = getLineIdx(pos);
+        size_t lineStart = lineStarts[lineIdx];
+        size_t nextLineStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : len;
+        size_t lineEnd = nextLineStart;
+        if (lineEnd > lineStart && pt.charAt(lineEnd - 1) == '\n') lineEnd--;
+
+        if (pos < lineStart || pos > lineEnd) {
+            return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
+        }
+
+        std::string lineUtf8 = pt.getRange(lineStart, lineEnd - lineStart);
+        std::wstring lineUtf16 = UTF8ToW(lineUtf8);
+
+        size_t offsetInLine = pos - lineStart;
+        std::string preUtf8 = lineUtf8.substr(0, offsetInLine);
+        size_t u16Pos = UTF8ToW(preUtf8).length();
+
+        IDWriteTextLayout* layout = nullptr;
+        HRESULT hr = dwFactory->CreateTextLayout(lineUtf16.c_str(), (UINT32)lineUtf16.length(), textFormat, 10000.0f, (FLOAT)lineHeight, &layout);
+
+        size_t newU16Pos = u16Pos;
+
+        if (SUCCEEDED(hr) && layout) {
+            UINT32 clusterCount = 0;
+            layout->GetClusterMetrics(NULL, 0, &clusterCount);
+            if (clusterCount > 0) {
+                std::vector<DWRITE_CLUSTER_METRICS> clusters(clusterCount);
+                layout->GetClusterMetrics(clusters.data(), clusterCount, &clusterCount);
+
+                size_t currentU16 = 0;
+                bool found = false;
+
+                if (forward) {
+                    for (const auto& cm : clusters) {
+                        size_t nextU16 = currentU16 + cm.length;
+                        if (u16Pos >= currentU16 && u16Pos < nextU16) {
+                            newU16Pos = nextU16;
+                            found = true;
+                            break;
+                        }
+                        currentU16 = nextU16;
+                    }
+                    if (!found) newU16Pos = u16Pos;
+                }
+                else {
+                    size_t currentU16 = 0;
+                    for (const auto& cm : clusters) {
+                        size_t nextU16 = currentU16 + cm.length;
+                        if (u16Pos > currentU16 && u16Pos <= nextU16) {
+                            newU16Pos = currentU16;
+                            found = true;
+                            break;
+                        }
+                        currentU16 = nextU16;
+                    }
+                    if (!found && u16Pos > 0) {
+                        if (u16Pos == lineUtf16.length()) {
+                            size_t c = 0;
+                            for (const auto& cm : clusters) {
+                                if (c + cm.length == u16Pos) { newU16Pos = c; break; }
+                                c += cm.length;
+                            }
+                        }
+                    }
+                }
+            }
+            layout->Release();
+        }
+
+        if (newU16Pos != u16Pos) {
+            std::wstring preNewW = lineUtf16.substr(0, newU16Pos);
+            size_t newOffset = WToUTF8(preNewW).length();
+            return lineStart + newOffset;
+        }
+
+        return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
     }
 
     void performDragMove() {
@@ -1161,13 +1264,10 @@ struct Editor {
                 len = c.end() - start;
             }
             else {
-                if (start < pt.length()) {
-                    unsigned char ch = (unsigned char)pt.charAt(start);
-                    if ((ch & 0x80) == 0) len = 1;
-                    else if ((ch & 0xE0) == 0xC0) len = 2;
-                    else if ((ch & 0xF0) == 0xE0) len = 3;
-                    else if ((ch & 0xF8) == 0xF0) len = 4;
-                    else len = 1;
+                // Use moveCaretVisual to determine the next grapheme cluster end
+                size_t nextPos = moveCaretVisual(start, true);
+                if (nextPos > start) {
+                    len = nextPos - start;
                 }
             }
 
@@ -1198,11 +1298,16 @@ struct Editor {
         std::sort(indices.begin(), indices.end(), [&](int a, int b) { return cursors[a].start() > cursors[b].start(); });
         for (int idx : indices) {
             Cursor& c = cursors[idx]; size_t start = c.start(); size_t len = 0;
-            if (c.hasSelection()) len = c.end() - start;
+            if (c.hasSelection()) {
+                len = c.end() - start;
+            }
             else if (start > 0) {
-                size_t check = start - 1; len = 1; int look = 0;
-                while (check > 0 && look < 3) { unsigned char ch = (unsigned char)pt.charAt(check); if ((ch & 0xC0) == 0x80) { check--; len++; look++; } else break; }
-                start -= len;
+                // Use moveCaretVisual to determine the previous grapheme cluster start
+                size_t prevPos = moveCaretVisual(start, false);
+                if (prevPos < start) {
+                    len = start - prevPos;
+                    start = prevPos; // Start erasing from the new start position
+                }
             }
             if (len > 0) {
                 std::string deleted = pt.getRange(start, len); pt.erase(start, len);
@@ -1487,7 +1592,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
             for (auto& c : g_editor.cursors) {
                 if (c.hasSelection() && !isShift) { c.head = c.start(); c.anchor = c.head; }
-                else { if (isCtrl) c.head = g_editor.moveWordLeft(c.head); else { if (c.head > 0) { c.head--; while (c.head > 0) { unsigned char ch = (unsigned char)g_editor.pt.charAt(c.head); if ((ch & 0xC0) == 0x80) c.head--; else break; } } } if (!isShift) c.anchor = c.head; }
+                else { if (isCtrl) c.head = g_editor.moveWordLeft(c.head); else c.head = g_editor.moveCaretVisual(c.head, false); if (!isShift) c.anchor = c.head; }
                 c.desiredX = g_editor.getXFromPos(c.head);
             }
             g_editor.mergeCursors(); g_editor.ensureCaretVisible();
@@ -1501,7 +1606,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
             for (auto& c : g_editor.cursors) {
                 if (c.hasSelection() && !isShift) { c.head = c.end(); c.anchor = c.head; }
-                else { if (isCtrl) c.head = g_editor.moveWordRight(c.head); else { if (c.head < g_editor.pt.length()) { c.head++; while (c.head < g_editor.pt.length()) { unsigned char ch = (unsigned char)g_editor.pt.charAt(c.head); if ((ch & 0xC0) == 0x80) c.head++; else break; } } } if (!isShift) c.anchor = c.head; }
+                else { if (isCtrl) c.head = g_editor.moveWordRight(c.head); else c.head = g_editor.moveCaretVisual(c.head, true); if (!isShift) c.anchor = c.head; }
                 c.desiredX = g_editor.getXFromPos(c.head);
             }
             g_editor.mergeCursors(); g_editor.ensureCaretVisible();
@@ -1552,10 +1657,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     const wchar_t* filePath = nullptr; if (argc >= 2) filePath = argv[1];
-    WNDCLASS wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"miu";
-    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
-    wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
-    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"miu", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
+    WNDCLASS wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
+    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"FastMiniEditor - Minimal", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
     if (!hwnd) return 0;
     ShowWindow(hwnd, nCmdShow);
     MappedFile mf; if (filePath) { if (mf.open(filePath)) { g_editor.pt.initFromFile(mf.ptr, mf.size); g_editor.rebuildLineStarts(); } }
