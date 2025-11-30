@@ -26,14 +26,22 @@
 // Font Scaling (Ctrl+Wheel) & Zoom Overlay added.
 // Visual Cursor Movement for Grapheme Clusters (Emoji support) restored.
 // Rectangular Selection HitTest fixed for Surrogate Pairs (prevents Mojibake).
+// File I/O (Open/Save) features added with Safe Overwrite strategy.
+// New File (Ctrl+N) support added with unsaved changes check.
+// Build Fixed: Restored all missing methods inside Editor struct.
 // Build (MSVC):
-// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib
+// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib
+
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define NOMINMAX // Prevent windows.h from defining min/max macros
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <imm.h> // IME support
+#include <commdlg.h> // Open/Save Dialog
 #include <string>
 #include <vector>
 #include <memory>
@@ -48,6 +56,7 @@
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "imm32.lib") // IME lib
+#pragma comment(lib, "comdlg32.lib") // Dialog lib
 
 // --- UTF helpers --------------------------------------------------
 static std::wstring UTF8ToW(const std::string& s) {
@@ -87,7 +96,14 @@ struct PieceTable {
     void initFromFile(const char* data, size_t size) {
         origPtr = data; origSize = size;
         pieces.clear();
+        addBuf.clear();
         if (size > 0) pieces.push_back({ true, 0, size });
+    }
+
+    void initEmpty() {
+        origPtr = nullptr; origSize = 0;
+        pieces.clear();
+        addBuf.clear();
     }
 
     size_t length() const {
@@ -256,6 +272,10 @@ struct UndoManager {
     std::vector<EditBatch> undoStack;
     std::vector<EditBatch> redoStack;
 
+    void clear() {
+        undoStack.clear();
+        redoStack.clear();
+    }
     void push(const EditBatch& batch) {
         undoStack.push_back(batch);
         redoStack.clear();
@@ -274,9 +294,17 @@ struct MappedFile {
     size_t size = 0;
 
     bool open(const wchar_t* path) {
-        hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        // Important: FILE_SHARE_DELETE is needed to allow renaming/deleting the file while it is open (for atomic save)
+        hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return false;
         LARGE_INTEGER li; if (!GetFileSizeEx(hFile, &li)) return false; size = (size_t)li.QuadPart;
+
+        if (size == 0) {
+            // MapFile cannot be created for size 0
+            ptr = nullptr;
+            return true;
+        }
+
         hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
         if (!hMap) return false;
         ptr = (const char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
@@ -296,6 +324,10 @@ struct Editor {
     HWND hwnd = NULL;
     PieceTable pt;
     UndoManager undo;
+
+    std::unique_ptr<MappedFile> fileMap;
+    std::wstring currentFilePath;
+    bool isDirty = false;
 
     // Multi-cursor state
     std::vector<Cursor> cursors;
@@ -398,6 +430,8 @@ struct Editor {
 
         // Initial cursor
         cursors.push_back({ 0, 0, 0.0f });
+
+        updateTitleBar();
     }
 
     void updateFont(float size) {
@@ -435,6 +469,21 @@ struct Editor {
         if (dwFactory) { dwFactory->Release(); dwFactory = nullptr; }
         if (rend) { rend->Release(); rend = nullptr; }
         if (d2dFactory) { d2dFactory->Release(); d2dFactory = nullptr; }
+    }
+
+    void updateTitleBar() {
+        if (!hwnd) return;
+        std::wstring title = L"FastMiniEditor - ";
+        if (currentFilePath.empty()) {
+            title += L"Untitled";
+        }
+        else {
+            title += currentFilePath;
+        }
+        if (isDirty) {
+            title += L" *";
+        }
+        SetWindowTextW(hwnd, title.c_str());
     }
 
     void updateGutterWidth() {
@@ -748,100 +797,6 @@ struct Editor {
             size_t hd = getPosFromLineAndX(i, targetHeadX);
             cursors.push_back({ hd, anc, targetHeadX });
         }
-    }
-
-    // Helper to move caret visually considering grapheme clusters (using DirectWrite clusters)
-    size_t moveCaretVisual(size_t pos, bool forward) {
-        size_t len = pt.length();
-        if (pos == 0 && !forward) return 0;
-        if (pos >= len && forward) return len;
-
-        // Check newline - simple logic
-        char c = pt.charAt(pos);
-        if (forward) {
-            if (c == '\n') return pos + 1;
-        }
-        else {
-            if (pos > 0 && pt.charAt(pos - 1) == '\n') return pos - 1;
-        }
-
-        // Get Line
-        int lineIdx = getLineIdx(pos);
-        size_t lineStart = lineStarts[lineIdx];
-        size_t nextLineStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : len;
-        size_t lineEnd = nextLineStart;
-        if (lineEnd > lineStart && pt.charAt(lineEnd - 1) == '\n') lineEnd--;
-
-        if (pos < lineStart || pos > lineEnd) {
-            return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
-        }
-
-        std::string lineUtf8 = pt.getRange(lineStart, lineEnd - lineStart);
-        std::wstring lineUtf16 = UTF8ToW(lineUtf8);
-
-        size_t offsetInLine = pos - lineStart;
-        std::string preUtf8 = lineUtf8.substr(0, offsetInLine);
-        size_t u16Pos = UTF8ToW(preUtf8).length();
-
-        IDWriteTextLayout* layout = nullptr;
-        HRESULT hr = dwFactory->CreateTextLayout(lineUtf16.c_str(), (UINT32)lineUtf16.length(), textFormat, 10000.0f, (FLOAT)lineHeight, &layout);
-
-        size_t newU16Pos = u16Pos;
-
-        if (SUCCEEDED(hr) && layout) {
-            UINT32 clusterCount = 0;
-            layout->GetClusterMetrics(NULL, 0, &clusterCount);
-            if (clusterCount > 0) {
-                std::vector<DWRITE_CLUSTER_METRICS> clusters(clusterCount);
-                layout->GetClusterMetrics(clusters.data(), clusterCount, &clusterCount);
-
-                size_t currentU16 = 0;
-                bool found = false;
-
-                if (forward) {
-                    for (const auto& cm : clusters) {
-                        size_t nextU16 = currentU16 + cm.length;
-                        if (u16Pos >= currentU16 && u16Pos < nextU16) {
-                            newU16Pos = nextU16;
-                            found = true;
-                            break;
-                        }
-                        currentU16 = nextU16;
-                    }
-                    if (!found) newU16Pos = u16Pos;
-                }
-                else {
-                    size_t currentU16 = 0;
-                    for (const auto& cm : clusters) {
-                        size_t nextU16 = currentU16 + cm.length;
-                        if (u16Pos > currentU16 && u16Pos <= nextU16) {
-                            newU16Pos = currentU16;
-                            found = true;
-                            break;
-                        }
-                        currentU16 = nextU16;
-                    }
-                    if (!found && u16Pos > 0) {
-                        if (u16Pos == lineUtf16.length()) {
-                            size_t c = 0;
-                            for (const auto& cm : clusters) {
-                                if (c + cm.length == u16Pos) { newU16Pos = c; break; }
-                                c += cm.length;
-                            }
-                        }
-                    }
-                }
-            }
-            layout->Release();
-        }
-
-        if (newU16Pos != u16Pos) {
-            std::wstring preNewW = lineUtf16.substr(0, newU16Pos);
-            size_t newOffset = WToUTF8(preNewW).length();
-            return lineStart + newOffset;
-        }
-
-        return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
     }
 
     void performDragMove() {
@@ -1173,20 +1128,15 @@ struct Editor {
         rend->EndDraw();
         EndPaint(hwnd, &ps);
     }
-    // ... (rest of code is unchanged)
+
+    // ... Helper methods ...
     void mergeCursors() {
         if (cursors.empty()) return;
         std::sort(cursors.begin(), cursors.end(), [](const Cursor& a, const Cursor& b) { return a.head < b.head; });
         std::vector<Cursor> merged; merged.push_back(cursors[0]);
         for (size_t i = 1; i < cursors.size(); ++i) {
             Cursor& prev = merged.back(); Cursor& curr = cursors[i];
-            if (curr.start() <= prev.end()) {
-                size_t newStart = std::min(prev.start(), curr.start());
-                size_t newEnd = std::max(prev.end(), curr.end());
-                bool prevForward = prev.head >= prev.anchor;
-                prev.anchor = prevForward ? newStart : newEnd;
-                prev.head = prevForward ? newEnd : newStart;
-            }
+            if (curr.start() <= prev.end()) { size_t newStart = std::min(prev.start(), curr.start()); size_t newEnd = std::max(prev.end(), curr.end()); bool prevForward = prev.head >= prev.anchor; prev.anchor = prevForward ? newStart : newEnd; prev.head = prevForward ? newEnd : newStart; }
             else { merged.push_back(curr); }
         }
         cursors = merged;
@@ -1201,14 +1151,14 @@ struct Editor {
         cursors.clear(); cursors.push_back({ end, start, getXFromPos(end) });
     }
     void selectLineAt(size_t pos) {
-        int lineIdx = getLineIdx(pos);
-        size_t start = lineStarts[lineIdx];
-        size_t end = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
+        int lineIdx = getLineIdx(pos); size_t start = lineStarts[lineIdx]; size_t end = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
         cursors.clear(); cursors.push_back({ end, start, getXFromPos(end) });
     }
     size_t moveWordLeft(size_t pos) {
         if (pos == 0) return 0; size_t curr = pos;
-        if (curr > 0 && pt.charAt(curr - 1) == '\n') return curr - 1;
+        if (curr > 0 && pt.charAt(curr - 1) == '\n') {
+            return curr - 1;
+        }
         while (curr > 0) { char c = pt.charAt(curr - 1); if (c == '\n' || !isspace(c)) break; curr--; }
         if (curr == 0) return 0; if (pt.charAt(curr - 1) == '\n') return curr;
         bool type = isWordChar(pt.charAt(curr - 1));
@@ -1225,8 +1175,103 @@ struct Editor {
         while (curr < len) { char c = pt.charAt(curr); if (c == '\n' || !isspace(c)) break; curr++; }
         return curr;
     }
+
+    // Helper to move caret visually considering grapheme clusters (using DirectWrite clusters)
+    size_t moveCaretVisual(size_t pos, bool forward) {
+        size_t len = pt.length();
+        if (pos == 0 && !forward) return 0;
+        if (pos >= len && forward) return len;
+
+        // Check newline - simple logic
+        char c = pt.charAt(pos);
+        if (forward) {
+            if (c == '\n') return pos + 1;
+        }
+        else {
+            if (pos > 0 && pt.charAt(pos - 1) == '\n') return pos - 1;
+        }
+
+        // Get Line
+        int lineIdx = getLineIdx(pos);
+        size_t lineStart = lineStarts[lineIdx];
+        size_t nextLineStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : len;
+        size_t lineEnd = nextLineStart;
+        if (lineEnd > lineStart && pt.charAt(lineEnd - 1) == '\n') lineEnd--;
+
+        if (pos < lineStart || pos > lineEnd) {
+            return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
+        }
+
+        std::string lineUtf8 = pt.getRange(lineStart, lineEnd - lineStart);
+        std::wstring lineUtf16 = UTF8ToW(lineUtf8);
+
+        size_t offsetInLine = pos - lineStart;
+        std::string preUtf8 = lineUtf8.substr(0, offsetInLine);
+        size_t u16Pos = UTF8ToW(preUtf8).length();
+
+        IDWriteTextLayout* layout = nullptr;
+        HRESULT hr = dwFactory->CreateTextLayout(lineUtf16.c_str(), (UINT32)lineUtf16.length(), textFormat, 10000.0f, (FLOAT)lineHeight, &layout);
+
+        size_t newU16Pos = u16Pos;
+
+        if (SUCCEEDED(hr) && layout) {
+            UINT32 clusterCount = 0;
+            layout->GetClusterMetrics(NULL, 0, &clusterCount);
+            if (clusterCount > 0) {
+                std::vector<DWRITE_CLUSTER_METRICS> clusters(clusterCount);
+                layout->GetClusterMetrics(clusters.data(), clusterCount, &clusterCount);
+
+                size_t currentU16 = 0;
+                bool found = false;
+
+                if (forward) {
+                    for (const auto& cm : clusters) {
+                        size_t nextU16 = currentU16 + cm.length;
+                        if (u16Pos >= currentU16 && u16Pos < nextU16) {
+                            newU16Pos = nextU16;
+                            found = true;
+                            break;
+                        }
+                        currentU16 = nextU16;
+                    }
+                    if (!found) newU16Pos = u16Pos;
+                }
+                else {
+                    size_t currentU16 = 0;
+                    for (const auto& cm : clusters) {
+                        size_t nextU16 = currentU16 + cm.length;
+                        if (u16Pos > currentU16 && u16Pos <= nextU16) {
+                            newU16Pos = currentU16;
+                            found = true;
+                            break;
+                        }
+                        currentU16 = nextU16;
+                    }
+                    if (!found && u16Pos > 0) {
+                        if (u16Pos == lineUtf16.length()) {
+                            size_t c = 0;
+                            for (const auto& cm : clusters) {
+                                if (c + cm.length == u16Pos) { newU16Pos = c; break; }
+                                c += cm.length;
+                            }
+                        }
+                    }
+                }
+            }
+            layout->Release();
+        }
+
+        if (newU16Pos != u16Pos) {
+            std::wstring preNewW = lineUtf16.substr(0, newU16Pos);
+            size_t newOffset = WToUTF8(preNewW).length();
+            return lineStart + newOffset;
+        }
+
+        return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
+    }
+
     void insertAtCursors(const std::string& text) {
-        commitPadding();
+        commitPadding(); isDirty = true; updateTitleBar();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1250,7 +1295,7 @@ struct Editor {
         batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible();
     }
     void deleteForwardAtCursors() {
-        commitPadding();
+        commitPadding(); isDirty = true; updateTitleBar();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1291,7 +1336,7 @@ struct Editor {
         ensureCaretVisible();
     }
     void backspaceAtCursors() {
-        commitPadding();
+        commitPadding(); isDirty = true; updateTitleBar();
         if (cursors.empty()) return;
         EditBatch batch; batch.beforeCursors = cursors;
         std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
@@ -1345,7 +1390,6 @@ struct Editor {
             CloseClipboard();
         }
     }
-
     void pasteFromClipboard() {
         if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return;
         if (OpenClipboard(hwnd)) {
@@ -1361,7 +1405,6 @@ struct Editor {
             CloseClipboard();
         }
     }
-
     void cutToClipboard() {
         copyToClipboard();
         insertAtCursors("");
@@ -1386,6 +1429,49 @@ struct Editor {
         }
         cursors = b.afterCursors; rebuildLineStarts(); ensureCaretVisible();
     }
+    bool checkUnsavedChanges() {
+        if (!isDirty) return true;
+        int result = MessageBoxW(hwnd, L"変更を保存しますか?", L"確認", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (result == IDCANCEL) return false;
+        if (result == IDYES) { if (currentFilePath.empty()) return saveFileAs(); else return saveFile(currentFilePath); }
+        return true;
+    }
+    bool openFile() {
+        if (!checkUnsavedChanges()) return false;
+        WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+        if (GetOpenFileNameW(&ofn) == TRUE) {
+            fileMap.reset(new MappedFile());
+            if (fileMap->open(szFile)) {
+                pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = szFile; isDirty = false; undo.clear();
+                cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0;
+                rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); return true;
+            }
+            else { MessageBoxW(hwnd, L"ファイルを開けませんでした。", L"エラー", MB_OK | MB_ICONERROR); }
+        }
+        return false;
+    }
+    bool saveFile(const std::wstring& path) {
+        std::wstring tempPath = path + L".tmp";
+        HANDLE hTemp = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hTemp == INVALID_HANDLE_VALUE) { MessageBoxW(hwnd, L"一時ファイルを作成できませんでした。", L"エラー", MB_OK | MB_ICONERROR); return false; }
+        bool success = true;
+        for (const auto& p : pt.pieces) {
+            const char* dataPtr = p.isOriginal ? (pt.origPtr + p.start) : (pt.addBuf.data() + p.start);
+            DWORD written = 0; if (!WriteFile(hTemp, dataPtr, (DWORD)p.len, &written, NULL) || written != p.len) { success = false; break; }
+        }
+        CloseHandle(hTemp);
+        if (!success) { DeleteFileW(tempPath.c_str()); MessageBoxW(hwnd, L"書き込みに失敗しました。", L"エラー", MB_OK | MB_ICONERROR); return false; }
+        if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { MessageBoxW(hwnd, L"ファイルを上書きできませんでした（ロックされています）。", L"エラー", MB_OK | MB_ICONERROR); DeleteFileW(tempPath.c_str()); return false; }
+        currentFilePath = path; isDirty = false; updateTitleBar(); return true;
+    }
+    bool saveFileAs() {
+        WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+        if (GetSaveFileNameW(&ofn) == TRUE) return saveFile(szFile); return false;
+    }
+    void newFile() {
+        if (!checkUnsavedChanges()) return;
+        pt.initEmpty(); currentFilePath.clear(); isDirty = false; undo.clear(); cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE);
+    }
 } g_editor;
 
 // --- Win32 Boilerplate ---
@@ -1398,34 +1484,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         DWORD curTime = GetMessageTime(); bool samePos = (abs(x - g_editor.lastClickX) < 5 && abs(y - g_editor.lastClickY) < 5);
         if (samePos && (curTime - g_editor.lastClickTime < GetDoubleClickTime())) g_editor.clickCount++; else g_editor.clickCount = 1;
         g_editor.lastClickTime = curTime; g_editor.lastClickX = x; g_editor.lastClickY = y;
-
         float dipX = x / g_editor.dpiScaleX; float dipY = y / g_editor.dpiScaleY;
 
-        // Handle drag-move initiation check
         if (g_editor.clickCount == 1 && !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) && !(GetKeyState(VK_CONTROL) & 0x8000)) {
-            // If inside existing selection?
             size_t clickedPos = g_editor.getDocPosFromPoint(x, y);
-            bool insideSelection = false;
-            size_t selStart = 0, selEnd = 0;
-            for (const auto& c : g_editor.cursors) {
-                if (c.hasSelection() && clickedPos >= c.start() && clickedPos < c.end()) {
-                    insideSelection = true;
-                    selStart = c.start(); selEnd = c.end();
-                    break;
-                }
-            }
-
-            if (insideSelection) {
-                g_editor.isDragMovePending = true;
-                g_editor.dragMoveSourceStart = selStart;
-                g_editor.dragMoveSourceEnd = selEnd;
-                // Do NOT clear selection or move cursor yet
-                return 0;
-            }
+            bool insideSelection = false; size_t selStart = 0, selEnd = 0;
+            for (const auto& c : g_editor.cursors) { if (c.hasSelection() && clickedPos >= c.start() && clickedPos < c.end()) { insideSelection = true; selStart = c.start(); selEnd = c.end(); break; } }
+            if (insideSelection) { g_editor.isDragMovePending = true; g_editor.dragMoveSourceStart = selStart; g_editor.dragMoveSourceEnd = selEnd; return 0; }
         }
-
-        g_editor.isDragMovePending = false;
-        g_editor.isDragMoving = false;
+        g_editor.isDragMovePending = false; g_editor.isDragMoving = false;
 
         if (GetKeyState(VK_MENU) & 0x8000) {
             g_editor.isRectSelecting = true; float virtualX = dipX - g_editor.gutterWidth + g_editor.hScrollPos; float virtualY = dipY + (g_editor.vScrollPos * g_editor.lineHeight);
@@ -1456,60 +1523,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     } break;
     case WM_MOUSEMOVE: {
         int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam); float dipX = x / g_editor.dpiScaleX; float dipY = y / g_editor.dpiScaleY;
-
-        if (g_editor.isDragMovePending) {
-            if (abs(x - g_editor.lastClickX) > 5 || abs(y - g_editor.lastClickY) > 5) {
-                g_editor.isDragMovePending = false;
-                g_editor.isDragMoving = true;
-                SetCursor(LoadCursor(NULL, IDC_ARROW));
-            }
-        }
-
-        if (g_editor.isDragMoving) {
-            g_editor.dragMoveDestPos = g_editor.getDocPosFromPoint(x, y);
-            InvalidateRect(hwnd, NULL, FALSE);
-            return 0;
-        }
-
+        if (g_editor.isDragMovePending) { if (abs(x - g_editor.lastClickX) > 5 || abs(y - g_editor.lastClickY) > 5) { g_editor.isDragMovePending = false; g_editor.isDragMoving = true; SetCursor(LoadCursor(NULL, IDC_ARROW)); } }
+        if (g_editor.isDragMoving) { g_editor.dragMoveDestPos = g_editor.getDocPosFromPoint(x, y); InvalidateRect(hwnd, NULL, FALSE); return 0; }
         if (g_editor.isDragging && !g_editor.isDragMoving && !g_editor.isDragMovePending) {
-            if (g_editor.isRectSelecting) {
-                float virtualX = dipX - g_editor.gutterWidth + g_editor.hScrollPos; float virtualY = dipY + (g_editor.vScrollPos * g_editor.lineHeight);
-                g_editor.rectHeadX = virtualX; g_editor.rectHeadY = virtualY; g_editor.updateRectSelection();
-            }
-            else {
-                size_t pos = g_editor.getDocPosFromPoint(x, y);
-                if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = pos; g_editor.cursors.back().desiredX = g_editor.getXFromPos(pos); }
-            }
+            if (g_editor.isRectSelecting) { float virtualX = dipX - g_editor.gutterWidth + g_editor.hScrollPos; float virtualY = dipY + (g_editor.vScrollPos * g_editor.lineHeight); g_editor.rectHeadX = virtualX; g_editor.rectHeadY = virtualY; g_editor.updateRectSelection(); }
+            else { size_t pos = g_editor.getDocPosFromPoint(x, y); if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = pos; g_editor.cursors.back().desiredX = g_editor.getXFromPos(pos); } }
             InvalidateRect(hwnd, NULL, FALSE);
         }
     } break;
     case WM_LBUTTONUP: {
         if (g_editor.isDragMovePending) {
-            // Released without dragging: act as normal click
             g_editor.isDragMovePending = false;
             size_t clickedPos = g_editor.getDocPosFromPoint((short)LOWORD(lParam), (short)HIWORD(lParam));
-            g_editor.cursors.clear();
-            g_editor.cursors.push_back({ clickedPos, clickedPos, g_editor.getXFromPos(clickedPos) });
-            InvalidateRect(hwnd, NULL, FALSE);
-
-            // Ensure dragging state is cleared
-            g_editor.isDragging = false;
-            ReleaseCapture();
+            g_editor.cursors.clear(); g_editor.cursors.push_back({ clickedPos, clickedPos, g_editor.getXFromPos(clickedPos) });
+            InvalidateRect(hwnd, NULL, FALSE); g_editor.isDragging = false; ReleaseCapture();
         }
-        else if (g_editor.isDragMoving) {
-            g_editor.performDragMove();
-            g_editor.isDragMoving = false;
-
-            // Ensure dragging state is cleared
-            g_editor.isDragging = false;
-            ReleaseCapture();
-        }
-        else if (g_editor.isDragging) {
-            ReleaseCapture();
-            g_editor.isDragging = false;
-            g_editor.isRectSelecting = false;
-            g_editor.mergeCursors();
-        }
+        else if (g_editor.isDragMoving) { g_editor.performDragMove(); g_editor.isDragMoving = false; g_editor.isDragging = false; ReleaseCapture(); }
+        else if (g_editor.isDragging) { ReleaseCapture(); g_editor.isDragging = false; g_editor.isRectSelecting = false; g_editor.mergeCursors(); }
     } break;
     case WM_VSCROLL: {
         int action = LOWORD(wParam); RECT rc; GetClientRect(hwnd, &rc); int page = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); int maxPos = (int)g_editor.lineStarts.size();
@@ -1524,36 +1554,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
-            float oldSize = g_editor.currentFontSize;
-            float scale = (delta > 0) ? 1.1f : 0.9f;
-            g_editor.updateFont(oldSize * scale);
-
-            g_editor.zoomPopupEndTime = GetTickCount() + 1000;
-            std::wstringstream ss;
-            ss << (int)g_editor.currentFontSize << L"px";
-            g_editor.zoomPopupText = ss.str();
-
-            SetTimer(hwnd, 1, 1000, NULL);
-            InvalidateRect(hwnd, NULL, FALSE);
+            float oldSize = g_editor.currentFontSize; float scale = (delta > 0) ? 1.1f : 0.9f; g_editor.updateFont(oldSize * scale);
+            g_editor.zoomPopupEndTime = GetTickCount() + 1000; std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str(); SetTimer(hwnd, 1, 1000, NULL); InvalidateRect(hwnd, NULL, FALSE);
         }
         else {
-            int lines = -delta / WHEEL_DELTA * 3;
-            g_editor.vScrollPos += lines;
-            int maxPos = (int)g_editor.lineStarts.size();
-            if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0;
-            if (g_editor.vScrollPos > maxPos) g_editor.vScrollPos = maxPos;
-            g_editor.updateScrollBars();
-            InvalidateRect(hwnd, NULL, FALSE);
+            int lines = -delta / WHEEL_DELTA * 3; g_editor.vScrollPos += lines; int maxPos = (int)g_editor.lineStarts.size();
+            if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0; if (g_editor.vScrollPos > maxPos) g_editor.vScrollPos = maxPos;
+            g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
         }
     } break;
-    case WM_TIMER: {
-        if (wParam == 1) {
-            KillTimer(hwnd, 1);
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-    } break;
+    case WM_TIMER: { if (wParam == 1) { KillTimer(hwnd, 1); InvalidateRect(hwnd, NULL, FALSE); } } break;
     case WM_CHAR: {
-        wchar_t ch = (wchar_t)wParam; if (ch == 3 || ch == 26 || ch == 1) break;
+        wchar_t ch = (wchar_t)wParam; if (ch == 3 || ch == 26 || ch == 1 || ch == 15 || ch == 19 || ch == 14) break; // Skip Ctrl+C,Z,A,O,S,N
         if (ch == 8) { g_editor.highSurrogate = 0; g_editor.backspaceAtCursors(); }
         else if (ch == '\r') { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
         else if (ch >= 32) {
@@ -1576,7 +1588,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_IME_SETCONTEXT: lParam &= ~ISC_SHOWUICOMPOSITIONWINDOW; return DefWindowProc(hwnd, msg, wParam, lParam);
     case WM_SYSKEYDOWN: if (wParam != VK_LEFT && wParam != VK_RIGHT && wParam != VK_UP && wParam != VK_DOWN) return DefWindowProc(hwnd, msg, wParam, lParam);
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') g_editor.performUndo();
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'O') g_editor.openFile();
+        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'N') g_editor.newFile();
+        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
+            if (g_editor.currentFilePath.empty()) g_editor.saveFileAs();
+            else g_editor.saveFile(g_editor.currentFilePath);
+        }
+        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') g_editor.performUndo();
         else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') g_editor.performRedo();
         else if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == 'C' || wParam == VK_INSERT)) g_editor.copyToClipboard();
         else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'X') g_editor.cutToClipboard();
@@ -1647,6 +1665,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (wParam == VK_PRIOR) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; RECT rc; GetClientRect(hwnd, &rc); int pageLines = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); for (auto& c : g_editor.cursors) { int currentLine = g_editor.getLineIdx(c.head); int targetLine = std::max(0, currentLine - pageLines); c.head = g_editor.getPosFromLineAndX(targetLine, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; } g_editor.mergeCursors(); g_editor.ensureCaretVisible(); }
         else if (wParam == VK_NEXT) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; RECT rc; GetClientRect(hwnd, &rc); int pageLines = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); for (auto& c : g_editor.cursors) { int currentLine = g_editor.getLineIdx(c.head); int targetLine = std::min((int)g_editor.lineStarts.size() - 1, currentLine + pageLines); c.head = g_editor.getPosFromLineAndX(targetLine, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; } g_editor.mergeCursors(); g_editor.ensureCaretVisible(); }
         break;
+    case WM_CLOSE:
+        if (g_editor.checkUnsavedChanges()) {
+            DestroyWindow(hwnd);
+        }
+        return 0;
     case WM_PAINT: g_editor.render(); break;
     case WM_DESTROY: g_editor.destroyGraphics(); PostQuitMessage(0); break;
     default: return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -1657,12 +1680,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     const wchar_t* filePath = nullptr; if (argc >= 2) filePath = argv[1];
-    WNDCLASS wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
+    WNDCLASS wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
     HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"FastMiniEditor - Minimal", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
     if (!hwnd) return 0;
     ShowWindow(hwnd, nCmdShow);
-    MappedFile mf; if (filePath) { if (mf.open(filePath)) { g_editor.pt.initFromFile(mf.ptr, mf.size); g_editor.rebuildLineStarts(); } }
-    else { g_editor.rebuildLineStarts(); }
+
+    // Initialize with file or empty
+    g_editor.initGraphics(hwnd); // Init graphics context first (needed for metrics)
+
+    // To properly init, we need to clear the initial empty buffer set by initGraphics
+    if (filePath) {
+        // Manually open
+        g_editor.fileMap.reset(new MappedFile());
+        if (g_editor.fileMap->open(filePath)) {
+            g_editor.pt.initFromFile(g_editor.fileMap->ptr, g_editor.fileMap->size);
+            g_editor.currentFilePath = filePath;
+            g_editor.isDirty = false;
+            g_editor.undo.clear();
+            g_editor.cursors.clear(); g_editor.cursors.push_back({ 0, 0, 0.0f });
+            g_editor.rebuildLineStarts();
+            g_editor.updateTitleBar();
+        }
+    }
+
+    // Ensure title bar is set initially
+    g_editor.updateTitleBar();
+
     MSG msg; while (GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     LocalFree(argv); return 0;
 }
