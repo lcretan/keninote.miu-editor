@@ -12,6 +12,10 @@
 #define IDC_FIND_WORD       1004
 #define IDC_FIND_CANCEL     1005
 #define IDC_FIND_REGEX      1006
+#define IDC_REPLACE_LABEL   1007
+#define IDC_REPLACE_EDIT    1008
+#define IDC_REPLACE_BTN     1009
+#define IDC_REPLACE_ALL_BTN 1010
 
 // Next default values for new objects
 // 
@@ -19,7 +23,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        103
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1007
+#define _APS_NEXT_CONTROL_VALUE         1011
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

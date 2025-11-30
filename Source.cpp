@@ -2,7 +2,7 @@
 // Minimal, high-performance text editor for huge files using Win32 + DirectWrite.
 // Features: memory-mapped original file, piece table for edits, undo/redo, caret, basic input, fast visible-range rendering.
 // ... (Features list abbreviated for brevity) ...
-// Search Feature: Global F3/Shift+F3 support (works inside Find Dialog).
+// Navigation Fix: Ctrl+Home/End now correctly reach navigation logic.
 
 // Build (MSVC):
 // rc FastMiniEditor.rc
@@ -267,9 +267,11 @@ struct Editor {
 
     // Search State
     std::string searchQuery;
+    std::string replaceQuery;
     bool searchMatchCase = false;
     bool searchWholeWord = false;
     bool searchRegex = false;
+    bool isReplaceMode = false;
 
     // Multi-cursor state
     std::vector<Cursor> cursors;
@@ -482,9 +484,14 @@ struct Editor {
         int linesVisible = (int)(clientH / lineHeight);
         SCROLLINFO si = {}; si.cbSize = sizeof(SCROLLINFO); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
         si.nMin = 0; si.nMax = (int)lineStarts.size() + linesVisible - 2;
-        if (si.nMax < 0) si.nMax = 0; si.nPage = linesVisible; si.nPos = vScrollPos;
+        if (si.nMax < 0) si.nMax = 0;
+        si.nPage = linesVisible;
+        si.nPos = vScrollPos;
         SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
-        si.nMin = 0; si.nMax = (int)maxLineWidth; si.nPage = (int)clientW; si.nPos = hScrollPos;
+        si.nMin = 0;
+        si.nMax = (int)maxLineWidth;
+        si.nPage = (int)clientW;
+        si.nPos = hScrollPos;
         SetScrollInfo(hwnd, SB_HORZ, &si, TRUE);
     }
 
@@ -546,529 +553,9 @@ struct Editor {
         return resultPos;
     }
 
-    // --- Search Logic ---
-    bool isWordChar(char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-    }
+    bool isWordChar(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 
-    // Returns position of found text
-    size_t findText(size_t startPos, const std::string& query, bool forward, bool matchCase, bool wholeWord, bool isRegex) {
-        if (query.empty()) return std::string::npos;
-        size_t len = pt.length();
-
-        if (isRegex) {
-            std::string fullText = pt.getRange(0, len);
-
-            try {
-                std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-                if (!matchCase) flags |= std::regex_constants::icase;
-                std::regex re(query, flags);
-
-                if (forward) {
-                    if (startPos >= fullText.size()) startPos = 0; // Wrap basic check
-
-                    std::smatch m;
-                    std::string::const_iterator searchStart = fullText.begin() + startPos;
-                    if (std::regex_search(searchStart, fullText.cend(), m, re)) {
-                        return startPos + m.position();
-                    }
-                    if (std::regex_search(fullText.cbegin(), fullText.cend(), m, re)) {
-                        return m.position();
-                    }
-                }
-                else {
-                    auto words_begin = std::sregex_iterator(fullText.begin(), fullText.end(), re);
-                    auto words_end = std::sregex_iterator();
-
-                    size_t bestPos = std::string::npos;
-                    size_t lastMatch = std::string::npos;
-
-                    size_t limit = (startPos == 0) ? len : startPos;
-
-                    for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-                        std::smatch match = *i;
-                        size_t pos = match.position();
-                        if (pos < limit) {
-                            bestPos = pos;
-                        }
-                        lastMatch = pos;
-                    }
-
-                    if (bestPos != std::string::npos) return bestPos;
-                    if (lastMatch != std::string::npos) return lastMatch;
-                }
-            }
-            catch (const std::regex_error&) {
-                return std::string::npos;
-            }
-            return std::string::npos;
-        }
-
-        // Standard linear search (Optimized for PieceTable without allocation)
-        size_t qLen = query.length();
-        auto toLower = [](char c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; };
-
-        size_t cur = startPos;
-        if (forward) { if (cur >= len) cur = 0; }
-        else { if (cur == 0) cur = len; else cur--; }
-
-        size_t count = 0;
-        while (count < len) {
-            bool match = true;
-            for (size_t i = 0; i < qLen; ++i) {
-                size_t p = cur + i;
-                if (p >= len) { match = false; break; }
-                char c1 = pt.charAt(p);
-                char c2 = query[i];
-                if (!matchCase) { c1 = toLower(c1); c2 = toLower(c2); }
-                if (c1 != c2) { match = false; break; }
-            }
-
-            if (match && wholeWord) {
-                if (cur > 0 && isWordChar(pt.charAt(cur - 1))) match = false;
-                if (match && (cur + qLen < len) && isWordChar(pt.charAt(cur + qLen))) match = false;
-            }
-
-            if (match) return cur;
-
-            if (forward) {
-                cur++; if (cur >= len) cur = 0;
-            }
-            else {
-                if (cur == 0) cur = len - 1; else cur--;
-            }
-            count++;
-        }
-        return std::string::npos;
-    }
-
-    void findNext(bool forward) {
-        if (searchQuery.empty()) { showFindDialog(); return; }
-
-        size_t startPos;
-        if (forward) {
-            // Search after current selection
-            startPos = cursors.empty() ? 0 : cursors.back().end();
-        }
-        else {
-            // Search before current selection
-            startPos = cursors.empty() ? 0 : cursors.back().start();
-        }
-
-        size_t pos = findText(startPos, searchQuery, forward, searchMatchCase, searchWholeWord, searchRegex);
-
-        if (pos != std::string::npos) {
-            size_t matchLen = searchQuery.length();
-            if (searchRegex) {
-                std::string fullText = pt.getRange(0, pt.length());
-                try {
-                    std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-                    if (!searchMatchCase) flags |= std::regex_constants::icase;
-                    std::regex re(searchQuery, flags);
-                    std::smatch m;
-                    std::string::const_iterator searchStart = fullText.begin() + pos;
-                    if (std::regex_search(searchStart, fullText.cend(), m, re, std::regex_constants::match_continuous)) {
-                        matchLen = m.length();
-                    }
-                }
-                catch (...) {}
-            }
-
-            cursors.clear();
-            cursors.push_back({ pos + matchLen, pos, getXFromPos(pos + matchLen) });
-            ensureCaretVisible();
-            updateTitleBar();
-        }
-        else {
-            MessageBeep(MB_ICONWARNING);
-        }
-    }
-
-    static INT_PTR CALLBACK FindDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
-        Editor* pThis = (Editor*)GetWindowLongPtr(hDlg, GWLP_USERDATA);
-        switch (message) {
-        case WM_INITDIALOG:
-            pThis = (Editor*)lParam;
-            SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)pThis);
-            // Center Dialog
-            {
-                RECT rcParent, rcDlg;
-                GetWindowRect(pThis->hwnd, &rcParent);
-                GetWindowRect(hDlg, &rcDlg);
-                int dlgW = rcDlg.right - rcDlg.left;
-                int dlgH = rcDlg.bottom - rcDlg.top;
-                int parentW = rcParent.right - rcParent.left;
-                int parentH = rcParent.bottom - rcParent.top;
-                int x = rcParent.left + (parentW - dlgW) / 2;
-                int y = rcParent.top + (parentH - dlgH) / 2;
-                SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-            }
-            // Fix: Use Wide API to support Emojis
-            SetDlgItemTextW(hDlg, IDC_FIND_EDIT, UTF8ToW(pThis->searchQuery).c_str());
-            CheckDlgButton(hDlg, IDC_FIND_CASE, pThis->searchMatchCase ? BST_CHECKED : BST_UNCHECKED);
-            CheckDlgButton(hDlg, IDC_FIND_WORD, pThis->searchWholeWord ? BST_CHECKED : BST_UNCHECKED);
-            CheckDlgButton(hDlg, IDC_FIND_REGEX, pThis->searchRegex ? BST_CHECKED : BST_UNCHECKED);
-            SetFocus(GetDlgItem(hDlg, IDC_FIND_EDIT));
-            SendMessage(GetDlgItem(hDlg, IDC_FIND_EDIT), EM_SETSEL, 0, -1);
-            return FALSE;
-        case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_FIND_CASE) {
-                pThis->searchMatchCase = IsDlgButtonChecked(hDlg, IDC_FIND_CASE) == BST_CHECKED;
-                InvalidateRect(pThis->hwnd, NULL, FALSE);
-            }
-            else if (LOWORD(wParam) == IDC_FIND_WORD) {
-                pThis->searchWholeWord = IsDlgButtonChecked(hDlg, IDC_FIND_WORD) == BST_CHECKED;
-                InvalidateRect(pThis->hwnd, NULL, FALSE);
-            }
-            else if (LOWORD(wParam) == IDC_FIND_REGEX) {
-                pThis->searchRegex = IsDlgButtonChecked(hDlg, IDC_FIND_REGEX) == BST_CHECKED;
-                InvalidateRect(pThis->hwnd, NULL, FALSE);
-            }
-            else if (LOWORD(wParam) == IDC_FIND_EDIT && HIWORD(wParam) == EN_CHANGE) {
-                wchar_t wbuf[1024]; // Fix: Use Wide buffer
-                GetDlgItemTextW(hDlg, IDC_FIND_EDIT, wbuf, 1024);
-                pThis->searchQuery = WToUTF8(wbuf);
-                InvalidateRect(pThis->hwnd, NULL, FALSE);
-            }
-            else if (LOWORD(wParam) == IDC_FIND_NEXT || LOWORD(wParam) == IDOK) {
-                wchar_t wbuf[1024]; // Fix: Use Wide buffer
-                GetDlgItemTextW(hDlg, IDC_FIND_EDIT, wbuf, 1024);
-                pThis->searchQuery = WToUTF8(wbuf);
-                pThis->searchMatchCase = IsDlgButtonChecked(hDlg, IDC_FIND_CASE) == BST_CHECKED;
-                pThis->searchWholeWord = IsDlgButtonChecked(hDlg, IDC_FIND_WORD) == BST_CHECKED;
-                pThis->searchRegex = IsDlgButtonChecked(hDlg, IDC_FIND_REGEX) == BST_CHECKED;
-                pThis->findNext(true);
-                return TRUE;
-            }
-            else if (LOWORD(wParam) == IDC_FIND_CANCEL || LOWORD(wParam) == IDCANCEL) {
-                DestroyWindow(hDlg);
-                pThis->hFindDlg = NULL;
-                return TRUE;
-            }
-            break;
-        }
-        return FALSE;
-    }
-
-    void showFindDialog() {
-        if (hFindDlg) { SetFocus(hFindDlg); return; }
-
-        if (!cursors.empty() && cursors.back().hasSelection()) {
-            size_t s = cursors.back().start();
-            size_t len = cursors.back().end() - s;
-            if (len < 100) {
-                searchQuery = pt.getRange(s, len);
-            }
-        }
-
-        hFindDlg = CreateDialogParamW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_FIND_DIALOG), hwnd, FindDlgProc, (LPARAM)this);
-        ShowWindow(hFindDlg, SW_SHOW);
-    }
-
-    // ... (Existing helper methods: rollbackPadding, commitPadding, updateRectSelection, performDragMove) ...
-    void rollbackPadding() {
-        if (pendingPadding.ops.empty()) return;
-        for (int i = (int)pendingPadding.ops.size() - 1; i >= 0; --i) {
-            const auto& op = pendingPadding.ops[i]; if (op.type == EditOp::Insert) pt.erase(op.pos, op.text.size());
-        }
-        pendingPadding.ops.clear(); rebuildLineStarts();
-    }
-    void commitPadding() { if (pendingPadding.ops.empty()) return; undo.push(pendingPadding); pendingPadding.ops.clear(); }
-    void updateRectSelection() {
-        rollbackPadding();
-        float startY = std::min(rectAnchorY, rectHeadY); float endY = std::max(rectAnchorY, rectHeadY);
-        int startLineIdx = (int)(startY / lineHeight); int endLineIdx = (int)(endY / lineHeight);
-        if (startLineIdx < 0) startLineIdx = 0; if (endLineIdx >= (int)lineStarts.size()) endLineIdx = (int)lineStarts.size() - 1;
-        float targetAnchorX = rectAnchorX; float targetHeadX = rectHeadX;
-        std::vector<int> lines; for (int i = startLineIdx; i <= endLineIdx; ++i) lines.push_back(i);
-        std::reverse(lines.begin(), lines.end());
-        cursors.clear();
-        for (int lineIdx : lines) {
-            size_t start = lineStarts[lineIdx]; size_t nextStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
-            size_t end = nextStart; if (end > start && pt.charAt(end - 1) == '\n') end--;
-            float currentWidth = 0; std::string lineStr = pt.getRange(start, end - start); std::wstring wLine = UTF8ToW(lineStr); currentWidth = (float)wLine.length() * charWidth;
-            float neededX = std::max(targetAnchorX, targetHeadX);
-            if (neededX > currentWidth) {
-                int spacesNeeded = (int)std::ceil((neededX - currentWidth) / charWidth);
-                if (spacesNeeded > 0) {
-                    std::string spaces(spacesNeeded, ' '); pt.insert(end, spaces);
-                    EditOp op; op.type = EditOp::Insert; op.pos = end; op.text = spaces; pendingPadding.ops.push_back(op);
-                }
-            }
-        }
-        if (!pendingPadding.ops.empty()) rebuildLineStarts();
-        for (int i = startLineIdx; i <= endLineIdx; ++i) {
-            size_t anc = getPosFromLineAndX(i, targetAnchorX); size_t hd = getPosFromLineAndX(i, targetHeadX); cursors.push_back({ hd, anc, targetHeadX });
-        }
-    }
-    void performDragMove() {
-        if (dragMoveDestPos >= dragMoveSourceStart && dragMoveDestPos <= dragMoveSourceEnd) return;
-        std::string text = pt.getRange(dragMoveSourceStart, dragMoveSourceEnd - dragMoveSourceStart);
-        EditBatch batch; batch.beforeCursors = cursors;
-        pt.erase(dragMoveSourceStart, text.size()); batch.ops.push_back({ EditOp::Erase, dragMoveSourceStart, text });
-        size_t insertPos = dragMoveDestPos; if (insertPos > dragMoveSourceStart) insertPos -= text.size();
-        pt.insert(insertPos, text); batch.ops.push_back({ EditOp::Insert, insertPos, text });
-        cursors.clear(); cursors.push_back({ insertPos + text.size(), insertPos, getXFromPos(insertPos + text.size()) });
-        batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
-    }
-
-    void render() {
-        if (!rend) return;
-        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-        rend->BeginDraw(); rend->Clear(background);
-        RECT rc; GetClientRect(hwnd, &rc); D2D1_SIZE_F size = rend->GetSize();
-        float clientW = size.width; float clientH = size.height;
-        int linesVisible = (int)(clientH / lineHeight) + 2;
-        std::string text = buildVisibleText(linesVisible);
-        size_t visibleStartOffset = (vScrollPos < (int)lineStarts.size()) ? lineStarts[vScrollPos] : pt.length();
-        size_t mainCaretPos = cursors.empty() ? 0 : cursors.back().head;
-        size_t caretOffsetInVisible = std::string::npos;
-        if (mainCaretPos >= visibleStartOffset) caretOffsetInVisible = mainCaretPos - visibleStartOffset;
-        bool hasIME = !imeComp.empty() && caretOffsetInVisible != std::string::npos && caretOffsetInVisible <= text.size();
-        if (hasIME) text.insert(caretOffsetInVisible, imeComp);
-        std::wstring wtext = UTF8ToW(text);
-        float layoutWidth = maxLineWidth + clientW;
-        IDWriteTextLayout* layout = nullptr;
-        HRESULT hr = dwFactory->CreateTextLayout(wtext.c_str(), (UINT32)wtext.size(), textFormat, layoutWidth, clientH, &layout);
-        D2D1_MATRIX_3X2_F transform = D2D1::Matrix3x2F::Translation(gutterWidth - (float)hScrollPos, 0);
-        rend->SetTransform(transform);
-        float imeCx = 0, imeCy = 0;
-
-        if (SUCCEEDED(hr) && layout) {
-            ID2D1SolidColorBrush* selBrush = nullptr; rend->CreateSolidColorBrush(selColor, &selBrush);
-            ID2D1SolidColorBrush* caretBrush = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), &caretBrush);
-            ID2D1SolidColorBrush* hlBrush = nullptr; rend->CreateSolidColorBrush(highlightColor, &hlBrush);
-
-            // --- Search Highlight Rendering ---
-            if (!searchQuery.empty()) {
-                if (searchRegex) {
-                    try {
-                        std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-                        if (!searchMatchCase) flags |= std::regex_constants::icase;
-                        std::regex re(searchQuery, flags);
-
-                        auto words_begin = std::sregex_iterator(text.begin(), text.end(), re);
-                        auto words_end = std::sregex_iterator();
-
-                        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-                            std::smatch match = *i;
-                            size_t offset = match.position();
-                            size_t len = match.length();
-
-                            size_t startU16 = UTF8ToW(text.substr(0, offset)).length();
-                            size_t lenU16 = UTF8ToW(text.substr(offset, len)).length();
-
-                            UINT32 count = 0;
-                            layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, 0, 0, &count);
-                            if (count > 0) {
-                                std::vector<DWRITE_HIT_TEST_METRICS> m(count);
-                                layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, &m[0], count, &count);
-                                for (const auto& mm : m) {
-                                    float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight;
-                                    rend->FillRectangle(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight), hlBrush);
-                                }
-                            }
-                        }
-                    }
-                    catch (...) {}
-                }
-                else {
-                    std::string q = searchQuery;
-                    std::string t = text;
-                    if (!searchMatchCase) {
-                        std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-                        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
-                    }
-
-                    size_t offset = 0;
-                    while ((offset = t.find(q, offset)) != std::string::npos) {
-                        bool match = true;
-                        if (searchWholeWord) {
-                            if (offset > 0 && isWordChar(text[offset - 1])) match = false;
-                            if (match && (offset + q.length() < text.length()) && isWordChar(text[offset + q.length()])) match = false;
-                        }
-
-                        if (match) {
-                            size_t startU16 = UTF8ToW(text.substr(0, offset)).length();
-                            size_t lenU16 = UTF8ToW(text.substr(offset, q.length())).length();
-                            UINT32 count = 0;
-                            layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, 0, 0, &count);
-                            if (count > 0) {
-                                std::vector<DWRITE_HIT_TEST_METRICS> m(count);
-                                layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, &m[0], count, &count);
-                                for (const auto& mm : m) {
-                                    float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight;
-                                    rend->FillRectangle(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight), hlBrush);
-                                }
-                            }
-                        }
-                        offset += 1;
-                    }
-                }
-            }
-
-            // --- Selection Rendering ---
-            // (Standard selection rendering code...)
-            ID2D1Geometry* unifiedSelectionGeo = nullptr;
-            std::vector<D2D1_RECT_F> rawRects;
-            float hInset = 4.0f; float vInset = 0.0f;
-            for (const auto& cursor : cursors) {
-                size_t s = cursor.start(); size_t e = cursor.end();
-                size_t relS = (s > visibleStartOffset) ? s - visibleStartOffset : 0;
-                size_t relE = (e > visibleStartOffset) ? e - visibleStartOffset : 0;
-                if (hasIME) {
-                    if (relS >= caretOffsetInVisible) relS += imeComp.size();
-                    if (relE >= caretOffsetInVisible) relE += imeComp.size();
-                }
-                if (relS < text.size() && relS != relE) {
-                    if (relE > text.size()) relE = text.size();
-                    if (relE > relS) {
-                        std::string subS = text.substr(0, relS); std::string subRange = text.substr(relS, relE - relS);
-                        size_t utf16Start = UTF8ToW(subS).size(); size_t utf16Len = UTF8ToW(subRange).size();
-                        UINT32 count = 0;
-                        layout->HitTestTextRange((UINT32)utf16Start, (UINT32)utf16Len, 0, 0, 0, 0, &count);
-                        if (count > 0) {
-                            std::vector<DWRITE_HIT_TEST_METRICS> m(count);
-                            layout->HitTestTextRange((UINT32)utf16Start, (UINT32)utf16Len, 0, 0, &m[0], count, &count);
-                            for (const auto& mm : m) {
-                                float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight;
-                                rawRects.push_back(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight));
-                            }
-                        }
-                        for (size_t k = 0; k < subRange.size(); ++k) {
-                            if (subRange[k] == '\n') {
-                                std::string pre = text.substr(0, relS + k); UINT32 idx16 = (UINT32)UTF8ToW(pre).size();
-                                DWRITE_HIT_TEST_METRICS m; FLOAT px, py;
-                                layout->HitTestTextPosition(idx16, FALSE, &px, &py, &m);
-                                float top = std::floor((m.top + lineHeight * 0.5f) / lineHeight) * lineHeight;
-                                rawRects.push_back(D2D1::RectF(px - 0.5f, top, px + charWidth, top + lineHeight));
-                            }
-                        }
-                    }
-                }
-            }
-            std::sort(rawRects.begin(), rawRects.end(), [](const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
-                if (std::abs(a.top - b.top) > 1.0f) return a.top < b.top; return a.left < b.left;
-                });
-            std::vector<D2D1_RECT_F> mergedRects;
-            if (!rawRects.empty()) {
-                mergedRects.push_back(rawRects[0]);
-                for (size_t i = 1; i < rawRects.size(); ++i) {
-                    D2D1_RECT_F& curr = mergedRects.back(); const D2D1_RECT_F& next = rawRects[i];
-                    bool sameLine = std::abs(curr.top - next.top) < 1.0f;
-                    bool touches = next.left <= curr.right + 1.0f;
-                    if (sameLine && touches) { curr.right = std::max(curr.right, next.right); curr.bottom = std::max(curr.bottom, next.bottom); }
-                    else mergedRects.push_back(next);
-                }
-            }
-            if (!mergedRects.empty()) {
-                ID2D1RectangleGeometry* firstRect = nullptr; D2D1_RECT_F r = mergedRects[0];
-                r.left += hInset; r.top += vInset; r.right -= hInset; r.bottom -= vInset;
-                d2dFactory->CreateRectangleGeometry(&r, &firstRect); unifiedSelectionGeo = firstRect;
-                for (size_t i = 1; i < mergedRects.size(); ++i) {
-                    D2D1_RECT_F rNext = mergedRects[i];
-                    rNext.left += hInset; rNext.top += vInset; rNext.right -= hInset; rNext.bottom -= vInset;
-                    ID2D1RectangleGeometry* nextGeo = nullptr; d2dFactory->CreateRectangleGeometry(&rNext, &nextGeo);
-                    ID2D1PathGeometry* pathGeo = nullptr; d2dFactory->CreatePathGeometry(&pathGeo);
-                    ID2D1GeometrySink* sink = nullptr; pathGeo->Open(&sink);
-                    unifiedSelectionGeo->CombineWithGeometry(nextGeo, D2D1_COMBINE_MODE_UNION, nullptr, sink);
-                    sink->Close(); sink->Release();
-                    unifiedSelectionGeo->Release(); unifiedSelectionGeo = pathGeo; nextGeo->Release();
-                }
-                if (unifiedSelectionGeo) {
-                    rend->FillGeometry(unifiedSelectionGeo, selBrush);
-                    rend->DrawGeometry(unifiedSelectionGeo, selBrush, 8.0f, roundJoinStyle);
-                    unifiedSelectionGeo->Release();
-                }
-            }
-
-            // Carets
-            if (isDragMoving) {
-                size_t relPos = (dragMoveDestPos > visibleStartOffset) ? dragMoveDestPos - visibleStartOffset : 0;
-                if (relPos <= text.size()) {
-                    std::string beforeCaret = text.substr(0, relPos); std::wstring wBefore = UTF8ToW(beforeCaret);
-                    DWRITE_HIT_TEST_METRICS m; FLOAT px, py;
-                    layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m);
-                    rend->DrawLine(D2D1::Point2F(px, py), D2D1::Point2F(px, py + lineHeight), caretBrush, 2.0f);
-                }
-            }
-            for (const auto& cursor : cursors) {
-                size_t head = cursor.head;
-                size_t relHead = (head > visibleStartOffset) ? head - visibleStartOffset : 0;
-                if (hasIME && relHead >= caretOffsetInVisible) relHead += imeComp.size();
-                if (relHead <= text.size()) {
-                    std::string beforeCaret = text.substr(0, relHead); std::wstring wBefore = UTF8ToW(beforeCaret);
-                    DWRITE_HIT_TEST_METRICS m; FLOAT px, py;
-                    layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m);
-                    rend->DrawLine(D2D1::Point2F(px, py), D2D1::Point2F(px, py + lineHeight), caretBrush);
-                    if (&cursor == &cursors.back()) { imeCx = px; imeCy = py; }
-                }
-            }
-            selBrush->Release(); caretBrush->Release(); hlBrush->Release();
-
-            // Text
-            ID2D1SolidColorBrush* brush = nullptr; rend->CreateSolidColorBrush(textColor, &brush);
-            rend->DrawTextLayout(D2D1::Point2F(0, 0), layout, brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-            brush->Release();
-
-            // IME Dotted Line
-            if (hasIME) {
-                std::string prefixUtf8 = text.substr(0, caretOffsetInVisible); std::wstring prefixWide = UTF8ToW(prefixUtf8);
-                UINT32 imeStart = (UINT32)prefixWide.size(); std::wstring imeCompWide = UTF8ToW(imeComp); UINT32 imeLen = (UINT32)imeCompWide.size();
-                UINT32 count = 0; layout->HitTestTextRange(imeStart, imeLen, 0, 0, 0, 0, &count);
-                if (count > 0) {
-                    std::vector<DWRITE_HIT_TEST_METRICS> m(count); layout->HitTestTextRange(imeStart, imeLen, 0, 0, &m[0], count, &count);
-                    ID2D1SolidColorBrush* underlineBrush = nullptr; rend->CreateSolidColorBrush(textColor, &underlineBrush);
-                    for (const auto& mm : m) {
-                        float x = mm.left; float y = std::floor(mm.top + mm.height - 2.0f) + 0.5f; float w = mm.width;
-                        if (dotStyle) rend->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x + w, y), underlineBrush, 1.5f, dotStyle);
-                        else rend->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x + w, y), underlineBrush, 1.0f);
-                    }
-                    underlineBrush->Release();
-                }
-            }
-            layout->Release();
-        }
-        rend->SetTransform(D2D1::Matrix3x2F::Identity());
-
-        // Gutter
-        ID2D1SolidColorBrush* gutterBgBrush = nullptr; rend->CreateSolidColorBrush(gutterBg, &gutterBgBrush);
-        rend->FillRectangle(D2D1::RectF(0, 0, gutterWidth, clientH), gutterBgBrush); gutterBgBrush->Release();
-        ID2D1SolidColorBrush* gutterTextBrush = nullptr; rend->CreateSolidColorBrush(gutterText, &gutterTextBrush);
-        int startLine = vScrollPos; int endLine = startLine + linesVisible;
-        if (endLine > (int)lineStarts.size()) endLine = (int)lineStarts.size();
-        for (int i = startLine; i < endLine; i++) {
-            std::wstring numStr = std::to_wstring(i + 1); float yPos = (float)((i - startLine)) * lineHeight;
-            IDWriteTextLayout* numLayout = nullptr;
-            if (SUCCEEDED(dwFactory->CreateTextLayout(numStr.c_str(), (UINT32)numStr.size(), textFormat, gutterWidth, lineHeight, &numLayout))) {
-                numLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-                rend->DrawTextLayout(D2D1::Point2F(0, yPos), numLayout, gutterTextBrush); numLayout->Release();
-            }
-        }
-        gutterTextBrush->Release();
-
-        // IME
-        HIMC hIMC = ImmGetContext(hwnd);
-        if (hIMC) {
-            COMPOSITIONFORM cf = {}; cf.dwStyle = CFS_POINT; cf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cf.ptCurrentPos.y = (LONG)imeCy;
-            ImmSetCompositionWindow(hIMC, &cf);
-            CANDIDATEFORM cdf = {}; cdf.dwIndex = 0; cdf.dwStyle = CFS_CANDIDATEPOS; cdf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cdf.ptCurrentPos.y = (LONG)(imeCy + lineHeight);
-            ImmSetCandidateWindow(hIMC, &cdf); ImmReleaseContext(hwnd, hIMC);
-        }
-
-        // Zoom Overlay
-        if (GetTickCount() < zoomPopupEndTime) {
-            D2D1_RECT_F popupRect = D2D1::RectF(clientW / 2 - 80, clientH / 2 - 40, clientW / 2 + 80, clientH / 2 + 40);
-            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.7f), &popupBg);
-            ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
-            rend->FillRoundedRectangle(D2D1::RoundedRect(popupRect, 10.0f, 10.0f), popupBg);
-            if (popupTextFormat) rend->DrawText(zoomPopupText.c_str(), (UINT32)zoomPopupText.size(), popupTextFormat, popupRect, popupText);
-            popupBg->Release(); popupText->Release();
-        }
-        rend->EndDraw(); EndPaint(hwnd, &ps);
-    }
-
-    // ... (mergeCursors, etc. same as before) ...
+    // --- Cursor Navigation Helpers (Must be inside Editor) ---
     void mergeCursors() {
         if (cursors.empty()) return;
         std::sort(cursors.begin(), cursors.end(), [](const Cursor& a, const Cursor& b) { return a.head < b.head; });
@@ -1155,339 +642,623 @@ struct Editor {
         }
         return forward ? std::min(pos + 1, len) : std::max(pos - 1, (size_t)0);
     }
-    // ... (rest of edit methods same as before) ...
-    void insertAtCursors(const std::string& text) {
-        commitPadding(); if (cursors.empty()) return;
-        EditBatch batch; batch.beforeCursors = cursors;
-        std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return cursors[a].start() > cursors[b].start(); });
-        for (int idx : indices) {
-            Cursor& c = cursors[idx];
-            if (c.hasSelection()) {
-                size_t start = c.start(); size_t len = c.end() - start; std::string deleted = pt.getRange(start, len); pt.erase(start, len);
-                batch.ops.push_back({ EditOp::Erase, start, deleted });
-                for (auto& other : cursors) { if (other.head > start) other.head -= len; if (other.anchor > start) other.anchor -= len; }
-                c.head = start; c.anchor = start;
+
+    // --- Find/Replace Logic ---
+    size_t findText(size_t startPos, const std::string& query, bool forward, bool matchCase, bool wholeWord, bool isRegex) {
+        if (query.empty()) return std::string::npos;
+        size_t len = pt.length();
+        if (isRegex) {
+            std::string fullText = pt.getRange(0, len);
+            try {
+                std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+                if (!matchCase) flags |= std::regex_constants::icase;
+                std::regex re(query, flags);
+                if (forward) {
+                    if (startPos >= fullText.size()) startPos = 0;
+                    std::smatch m;
+                    std::string::const_iterator searchStart = fullText.begin() + startPos;
+                    if (std::regex_search(searchStart, fullText.cend(), m, re)) return startPos + m.position();
+                    if (std::regex_search(fullText.cbegin(), fullText.cend(), m, re)) return m.position();
+                }
+                else {
+                    auto words_begin = std::sregex_iterator(fullText.begin(), fullText.end(), re);
+                    auto words_end = std::sregex_iterator();
+                    size_t bestPos = std::string::npos; size_t lastMatch = std::string::npos;
+                    size_t limit = (startPos == 0) ? len : startPos;
+                    for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+                        size_t pos = i->position();
+                        if (pos < limit) bestPos = pos;
+                        lastMatch = pos;
+                    }
+                    if (bestPos != std::string::npos) return bestPos;
+                    if (lastMatch != std::string::npos) return lastMatch;
+                }
+            }
+            catch (...) { return std::string::npos; }
+            return std::string::npos;
+        }
+        // Standard Search
+        size_t qLen = query.length();
+        auto toLower = [](char c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; };
+        size_t cur = startPos;
+        if (forward) { if (cur >= len) cur = 0; }
+        else { if (cur == 0) cur = len; else cur--; }
+        size_t count = 0;
+        while (count < len) {
+            bool match = true;
+            for (size_t i = 0; i < qLen; ++i) {
+                size_t p = cur + i; if (p >= len) { match = false; break; }
+                char c1 = pt.charAt(p); char c2 = query[i];
+                if (!matchCase) { c1 = toLower(c1); c2 = toLower(c2); }
+                if (c1 != c2) { match = false; break; }
+            }
+            if (match && wholeWord) {
+                if (cur > 0 && isWordChar(pt.charAt(cur - 1))) match = false;
+                if (match && (cur + qLen < len) && isWordChar(pt.charAt(cur + qLen))) match = false;
+            }
+            if (match) return cur;
+            if (forward) { cur++; if (cur >= len) cur = 0; }
+            else { if (cur == 0) cur = len - 1; else cur--; }
+            count++;
+        }
+        return std::string::npos;
+    }
+
+    void findNext(bool forward) {
+        if (searchQuery.empty()) { showFindDialog(false); return; }
+        size_t startPos = forward ? (cursors.empty() ? 0 : cursors.back().end()) : (cursors.empty() ? 0 : cursors.back().start());
+        size_t pos = findText(startPos, searchQuery, forward, searchMatchCase, searchWholeWord, searchRegex);
+        if (pos != std::string::npos) {
+            size_t matchLen = searchQuery.length();
+            if (searchRegex) {
+                std::string fullText = pt.getRange(0, pt.length());
+                try {
+                    std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+                    if (!searchMatchCase) flags |= std::regex_constants::icase;
+                    std::regex re(searchQuery, flags); std::smatch m;
+                    std::string::const_iterator searchStart = fullText.begin() + pos;
+                    if (std::regex_search(searchStart, fullText.cend(), m, re, std::regex_constants::match_continuous)) matchLen = m.length();
+                }
+                catch (...) {}
+            }
+            cursors.clear(); cursors.push_back({ pos + matchLen, pos, getXFromPos(pos + matchLen) });
+            ensureCaretVisible(); updateTitleBar();
+        }
+        else MessageBeep(MB_ICONWARNING);
+    }
+
+    void replaceNext() {
+        if (cursors.empty() || searchQuery.empty()) return;
+        Cursor& c = cursors.back();
+        if (!c.hasSelection()) { findNext(true); return; }
+
+        size_t len = c.end() - c.start();
+        std::string selText = pt.getRange(c.start(), len);
+        bool match = false;
+
+        if (searchRegex) {
+            try {
+                std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+                if (!searchMatchCase) flags |= std::regex_constants::icase;
+                std::regex re(searchQuery, flags);
+                match = std::regex_match(selText, re);
+            }
+            catch (...) {}
+        }
+        else {
+            if (len == searchQuery.length()) {
+                match = true;
+                for (size_t i = 0; i < len; ++i) {
+                    char c1 = selText[i]; char c2 = searchQuery[i];
+                    if (!searchMatchCase) { c1 = (c1 >= 'A' && c1 <= 'Z') ? c1 + ('a' - 'A') : c1; c2 = (c2 >= 'A' && c2 <= 'Z') ? c2 + ('a' - 'A') : c2; }
+                    if (c1 != c2) { match = false; break; }
+                }
             }
         }
-        for (int idx : indices) {
-            Cursor& c = cursors[idx]; size_t insertionPos = c.head; pt.insert(insertionPos, text);
-            batch.ops.push_back({ EditOp::Insert, insertionPos, text });
-            size_t len = text.size(); for (auto& other : cursors) { if (other.head >= insertionPos) other.head += len; if (other.anchor >= insertionPos) other.anchor += len; }
+
+        if (match) {
+            insertAtCursors(replaceQuery);
+            findNext(true);
         }
+        else {
+            findNext(true);
+        }
+    }
+
+    void replaceAll() {
+        if (searchQuery.empty()) return;
+        struct Match { size_t start; size_t len; };
+        std::vector<Match> matches;
+
+        size_t currentPos = 0;
+        size_t docLen = pt.length();
+
+        if (searchRegex) {
+            std::string fullText = pt.getRange(0, docLen);
+            try {
+                std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+                if (!searchMatchCase) flags |= std::regex_constants::icase;
+                std::regex re(searchQuery, flags);
+                auto begin = std::sregex_iterator(fullText.begin(), fullText.end(), re);
+                auto end = std::sregex_iterator();
+                for (auto i = begin; i != end; ++i) {
+                    matches.push_back({ (size_t)i->position(), (size_t)i->length() });
+                }
+            }
+            catch (...) { return; }
+        }
+        else {
+            while (true) {
+                size_t pos = findText(currentPos, searchQuery, true, searchMatchCase, searchWholeWord, false);
+                if (pos == std::string::npos || pos < currentPos) break;
+                matches.push_back({ pos, searchQuery.length() });
+                currentPos = pos + searchQuery.length();
+                if (currentPos > docLen) break;
+            }
+        }
+
+        if (matches.empty()) { MessageBeep(MB_ICONASTERISK); return; }
+
+        commitPadding();
+        EditBatch batch;
+        batch.beforeCursors = cursors;
+
+        for (auto it = matches.rbegin(); it != matches.rend(); ++it) {
+            size_t start = it->start;
+            size_t len = it->len;
+            std::string deleted = pt.getRange(start, len);
+            pt.erase(start, len);
+            batch.ops.push_back({ EditOp::Erase, start, deleted });
+            pt.insert(start, replaceQuery);
+            batch.ops.push_back({ EditOp::Insert, start, replaceQuery });
+        }
+
+        cursors.clear();
+        cursors.push_back({ 0, 0, 0.0f });
+        batch.afterCursors = cursors;
+        undo.push(batch);
+        rebuildLineStarts();
+        updateDirtyFlag();
+        InvalidateRect(hwnd, NULL, FALSE);
+        MessageBoxW(hwnd, (std::to_wstring(matches.size()) + L" 個の項目を置換しました。").c_str(), L"置換完了", MB_OK);
+    }
+
+    void updateFindReplaceUI(bool replaceMode) {
+        if (!hFindDlg) return;
+        isReplaceMode = replaceMode;
+        int show = replaceMode ? SW_SHOW : SW_HIDE;
+        ShowWindow(GetDlgItem(hFindDlg, IDC_REPLACE_LABEL), show);
+        ShowWindow(GetDlgItem(hFindDlg, IDC_REPLACE_EDIT), show);
+        ShowWindow(GetDlgItem(hFindDlg, IDC_REPLACE_BTN), show);
+        ShowWindow(GetDlgItem(hFindDlg, IDC_REPLACE_ALL_BTN), show);
+        SetWindowTextW(hFindDlg, replaceMode ? L"置換" : L"検索");
+    }
+
+    static INT_PTR CALLBACK FindDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+        Editor* pThis = (Editor*)GetWindowLongPtr(hDlg, GWLP_USERDATA);
+        switch (message) {
+        case WM_INITDIALOG:
+            pThis = (Editor*)lParam;
+            SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)pThis);
+            {
+                RECT rcParent, rcDlg; GetWindowRect(pThis->hwnd, &rcParent); GetWindowRect(hDlg, &rcDlg);
+                int x = rcParent.left + ((rcParent.right - rcParent.left) - (rcDlg.right - rcDlg.left)) / 2;
+                int y = rcParent.top + ((rcParent.bottom - rcParent.top) - (rcDlg.bottom - rcDlg.top)) / 2;
+                SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            }
+            SetDlgItemTextW(hDlg, IDC_FIND_EDIT, UTF8ToW(pThis->searchQuery).c_str());
+            SetDlgItemTextW(hDlg, IDC_REPLACE_EDIT, UTF8ToW(pThis->replaceQuery).c_str());
+            CheckDlgButton(hDlg, IDC_FIND_CASE, pThis->searchMatchCase ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_FIND_WORD, pThis->searchWholeWord ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_FIND_REGEX, pThis->searchRegex ? BST_CHECKED : BST_UNCHECKED);
+            pThis->updateFindReplaceUI(pThis->isReplaceMode);
+            SetFocus(GetDlgItem(hDlg, IDC_FIND_EDIT));
+            SendMessage(GetDlgItem(hDlg, IDC_FIND_EDIT), EM_SETSEL, 0, -1);
+            return FALSE;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDC_FIND_CASE) { pThis->searchMatchCase = IsDlgButtonChecked(hDlg, IDC_FIND_CASE) == BST_CHECKED; InvalidateRect(pThis->hwnd, NULL, FALSE); }
+            if (LOWORD(wParam) == IDC_FIND_WORD) { pThis->searchWholeWord = IsDlgButtonChecked(hDlg, IDC_FIND_WORD) == BST_CHECKED; InvalidateRect(pThis->hwnd, NULL, FALSE); }
+            if (LOWORD(wParam) == IDC_FIND_REGEX) { pThis->searchRegex = IsDlgButtonChecked(hDlg, IDC_FIND_REGEX) == BST_CHECKED; InvalidateRect(pThis->hwnd, NULL, FALSE); }
+            if (HIWORD(wParam) == EN_CHANGE) {
+                wchar_t wbuf[1024];
+                if (LOWORD(wParam) == IDC_FIND_EDIT) { GetDlgItemTextW(hDlg, IDC_FIND_EDIT, wbuf, 1024); pThis->searchQuery = WToUTF8(wbuf); InvalidateRect(pThis->hwnd, NULL, FALSE); }
+                if (LOWORD(wParam) == IDC_REPLACE_EDIT) { GetDlgItemTextW(hDlg, IDC_REPLACE_EDIT, wbuf, 1024); pThis->replaceQuery = WToUTF8(wbuf); }
+            }
+            if (LOWORD(wParam) == IDC_FIND_NEXT || LOWORD(wParam) == IDOK) {
+                pThis->findNext(true); return TRUE;
+            }
+            if (LOWORD(wParam) == IDC_REPLACE_BTN) {
+                pThis->replaceNext(); return TRUE;
+            }
+            if (LOWORD(wParam) == IDC_REPLACE_ALL_BTN) {
+                pThis->replaceAll(); return TRUE;
+            }
+            if (LOWORD(wParam) == IDC_FIND_CANCEL || LOWORD(wParam) == IDCANCEL) {
+                DestroyWindow(hDlg); pThis->hFindDlg = NULL; return TRUE;
+            }
+            break;
+        }
+        return FALSE;
+    }
+
+    void showFindDialog(bool replaceMode) {
+        isReplaceMode = replaceMode;
+        if (hFindDlg) {
+            updateFindReplaceUI(isReplaceMode);
+            SetFocus(hFindDlg);
+            if (!cursors.empty() && cursors.back().hasSelection()) {
+                size_t s = cursors.back().start(); size_t len = cursors.back().end() - s;
+                if (len < 100) {
+                    searchQuery = pt.getRange(s, len);
+                    SetDlgItemTextW(hFindDlg, IDC_FIND_EDIT, UTF8ToW(searchQuery).c_str());
+                    SendMessage(GetDlgItem(hFindDlg, IDC_FIND_EDIT), EM_SETSEL, 0, -1);
+                }
+            }
+            return;
+        }
+        if (!cursors.empty() && cursors.back().hasSelection()) {
+            size_t s = cursors.back().start(); size_t len = cursors.back().end() - s;
+            if (len < 100) searchQuery = pt.getRange(s, len);
+        }
+        hFindDlg = CreateDialogParamW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_FIND_DIALOG), hwnd, FindDlgProc, (LPARAM)this);
+        ShowWindow(hFindDlg, SW_SHOW);
+    }
+
+    // --- Edit Operations (Must be inside Editor) ---
+    void rollbackPadding() { if (pendingPadding.ops.empty()) return; for (int i = (int)pendingPadding.ops.size() - 1; i >= 0; --i) { const auto& op = pendingPadding.ops[i]; if (op.type == EditOp::Insert) pt.erase(op.pos, op.text.size()); } pendingPadding.ops.clear(); rebuildLineStarts(); }
+    void commitPadding() { if (pendingPadding.ops.empty()) return; undo.push(pendingPadding); pendingPadding.ops.clear(); }
+    void updateRectSelection() {
+        rollbackPadding();
+        float startY = std::min(rectAnchorY, rectHeadY); float endY = std::max(rectAnchorY, rectHeadY);
+        int startLineIdx = (int)(startY / lineHeight); int endLineIdx = (int)(endY / lineHeight);
+        if (startLineIdx < 0) startLineIdx = 0; if (endLineIdx >= (int)lineStarts.size()) endLineIdx = (int)lineStarts.size() - 1;
+        float targetAnchorX = rectAnchorX; float targetHeadX = rectHeadX;
+        std::vector<int> lines; for (int i = startLineIdx; i <= endLineIdx; ++i) lines.push_back(i); std::reverse(lines.begin(), lines.end());
+        cursors.clear();
+        for (int lineIdx : lines) {
+            size_t start = lineStarts[lineIdx]; size_t nextStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
+            size_t end = nextStart; if (end > start && pt.charAt(end - 1) == '\n') end--;
+            float currentWidth = 0; std::string lineStr = pt.getRange(start, end - start); std::wstring wLine = UTF8ToW(lineStr); currentWidth = (float)wLine.length() * charWidth;
+            float neededX = std::max(targetAnchorX, targetHeadX);
+            if (neededX > currentWidth) {
+                int spacesNeeded = (int)std::ceil((neededX - currentWidth) / charWidth);
+                if (spacesNeeded > 0) { std::string spaces(spacesNeeded, ' '); pt.insert(end, spaces); pendingPadding.ops.push_back({ EditOp::Insert, end, spaces }); }
+            }
+        }
+        if (!pendingPadding.ops.empty()) rebuildLineStarts();
+        for (int i = startLineIdx; i <= endLineIdx; ++i) { size_t anc = getPosFromLineAndX(i, targetAnchorX); size_t hd = getPosFromLineAndX(i, targetHeadX); cursors.push_back({ hd, anc, targetHeadX }); }
+    }
+    void performDragMove() {
+        if (dragMoveDestPos >= dragMoveSourceStart && dragMoveDestPos <= dragMoveSourceEnd) return;
+        std::string text = pt.getRange(dragMoveSourceStart, dragMoveSourceEnd - dragMoveSourceStart);
+        EditBatch batch; batch.beforeCursors = cursors;
+        pt.erase(dragMoveSourceStart, text.size()); batch.ops.push_back({ EditOp::Erase, dragMoveSourceStart, text });
+        size_t insertPos = dragMoveDestPos; if (insertPos > dragMoveSourceStart) insertPos -= text.size();
+        pt.insert(insertPos, text); batch.ops.push_back({ EditOp::Insert, insertPos, text });
+        cursors.clear(); cursors.push_back({ insertPos + text.size(), insertPos, getXFromPos(insertPos + text.size()) });
         batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
     }
-    void deleteForwardAtCursors() {
-        commitPadding(); if (cursors.empty()) return;
-        EditBatch batch; batch.beforeCursors = cursors;
-        std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return cursors[a].start() > cursors[b].start(); });
-        for (int idx : indices) {
-            Cursor& c = cursors[idx]; size_t start = c.start(); size_t len = 0;
-            if (c.hasSelection()) len = c.end() - start;
-            else { size_t nextPos = moveCaretVisual(start, true); if (nextPos > start) len = nextPos - start; }
-            if (len > 0 && start + len <= pt.length()) {
-                std::string deleted = pt.getRange(start, len); pt.erase(start, len);
-                batch.ops.push_back({ EditOp::Erase, start, deleted });
-                for (auto& other : cursors) { if (other.head > start) other.head -= len; if (other.anchor > start) other.anchor -= len; }
-                c.head = start; c.anchor = start;
+    void render() {
+        if (!rend) return;
+        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
+        rend->BeginDraw(); rend->Clear(background);
+        RECT rc; GetClientRect(hwnd, &rc); D2D1_SIZE_F size = rend->GetSize();
+        float clientW = size.width; float clientH = size.height;
+        int linesVisible = (int)(clientH / lineHeight) + 2;
+        std::string text = buildVisibleText(linesVisible);
+        size_t visibleStartOffset = (vScrollPos < (int)lineStarts.size()) ? lineStarts[vScrollPos] : pt.length();
+        size_t mainCaretPos = cursors.empty() ? 0 : cursors.back().head;
+        size_t caretOffsetInVisible = std::string::npos;
+        if (mainCaretPos >= visibleStartOffset) caretOffsetInVisible = mainCaretPos - visibleStartOffset;
+        bool hasIME = !imeComp.empty() && caretOffsetInVisible != std::string::npos && caretOffsetInVisible <= text.size();
+        if (hasIME) text.insert(caretOffsetInVisible, imeComp);
+        std::wstring wtext = UTF8ToW(text);
+        float layoutWidth = maxLineWidth + clientW;
+        IDWriteTextLayout* layout = nullptr;
+        HRESULT hr = dwFactory->CreateTextLayout(wtext.c_str(), (UINT32)wtext.size(), textFormat, layoutWidth, clientH, &layout);
+        D2D1_MATRIX_3X2_F transform = D2D1::Matrix3x2F::Translation(gutterWidth - (float)hScrollPos, 0);
+        rend->SetTransform(transform);
+        float imeCx = 0, imeCy = 0;
+        if (SUCCEEDED(hr) && layout) {
+            ID2D1SolidColorBrush* selBrush = nullptr; rend->CreateSolidColorBrush(selColor, &selBrush);
+            ID2D1SolidColorBrush* caretBrush = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), &caretBrush);
+            ID2D1SolidColorBrush* hlBrush = nullptr; rend->CreateSolidColorBrush(highlightColor, &hlBrush);
+            // Search Highlights
+            if (!searchQuery.empty()) {
+                if (searchRegex) {
+                    try {
+                        std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
+                        if (!searchMatchCase) flags |= std::regex_constants::icase;
+                        std::regex re(searchQuery, flags);
+                        auto words_begin = std::sregex_iterator(text.begin(), text.end(), re); auto words_end = std::sregex_iterator();
+                        for (auto i = words_begin; i != words_end; ++i) {
+                            size_t offset = i->position(); size_t len = i->length();
+                            size_t startU16 = UTF8ToW(text.substr(0, offset)).length(); size_t lenU16 = UTF8ToW(text.substr(offset, len)).length();
+                            UINT32 count = 0; layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, 0, 0, &count);
+                            if (count > 0) {
+                                std::vector<DWRITE_HIT_TEST_METRICS> m(count); layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, &m[0], count, &count);
+                                for (const auto& mm : m) { float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight; rend->FillRectangle(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight), hlBrush); }
+                            }
+                        }
+                    }
+                    catch (...) {}
+                }
+                else {
+                    std::string q = searchQuery; std::string t = text;
+                    if (!searchMatchCase) { std::transform(q.begin(), q.end(), q.begin(), ::tolower); std::transform(t.begin(), t.end(), t.begin(), ::tolower); }
+                    size_t offset = 0;
+                    while ((offset = t.find(q, offset)) != std::string::npos) {
+                        bool match = true;
+                        if (searchWholeWord) { if (offset > 0 && isWordChar(text[offset - 1])) match = false; if (match && (offset + q.length() < text.length()) && isWordChar(text[offset + q.length()])) match = false; }
+                        if (match) {
+                            size_t startU16 = UTF8ToW(text.substr(0, offset)).length(); size_t lenU16 = UTF8ToW(text.substr(offset, q.length())).length();
+                            UINT32 count = 0; layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, 0, 0, &count);
+                            if (count > 0) {
+                                std::vector<DWRITE_HIT_TEST_METRICS> m(count); layout->HitTestTextRange((UINT32)startU16, (UINT32)lenU16, 0, 0, &m[0], count, &count);
+                                for (const auto& mm : m) { float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight; rend->FillRectangle(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight), hlBrush); }
+                            }
+                        }
+                        offset += 1;
+                    }
+                }
+            }
+            // Selection & Carets
+            ID2D1Geometry* unifiedSelectionGeo = nullptr; std::vector<D2D1_RECT_F> rawRects; float hInset = 4.0f; float vInset = 0.0f;
+            for (const auto& cursor : cursors) {
+                size_t s = cursor.start(); size_t e = cursor.end(); size_t relS = (s > visibleStartOffset) ? s - visibleStartOffset : 0; size_t relE = (e > visibleStartOffset) ? e - visibleStartOffset : 0;
+                if (hasIME) { if (relS >= caretOffsetInVisible) relS += imeComp.size(); if (relE >= caretOffsetInVisible) relE += imeComp.size(); }
+                if (relS < text.size() && relS != relE) {
+                    if (relE > text.size()) relE = text.size();
+                    if (relE > relS) {
+                        std::string subS = text.substr(0, relS); std::string subRange = text.substr(relS, relE - relS);
+                        size_t utf16Start = UTF8ToW(subS).size(); size_t utf16Len = UTF8ToW(subRange).size();
+                        UINT32 count = 0; layout->HitTestTextRange((UINT32)utf16Start, (UINT32)utf16Len, 0, 0, 0, 0, &count);
+                        if (count > 0) {
+                            std::vector<DWRITE_HIT_TEST_METRICS> m(count); layout->HitTestTextRange((UINT32)utf16Start, (UINT32)utf16Len, 0, 0, &m[0], count, &count);
+                            for (const auto& mm : m) { float top = std::floor((mm.top + lineHeight * 0.5f) / lineHeight) * lineHeight; rawRects.push_back(D2D1::RectF(mm.left, top, mm.left + mm.width, top + lineHeight)); }
+                        }
+                        for (size_t k = 0; k < subRange.size(); ++k) {
+                            if (subRange[k] == '\n') {
+                                std::string pre = text.substr(0, relS + k); UINT32 idx16 = (UINT32)UTF8ToW(pre).size();
+                                DWRITE_HIT_TEST_METRICS m; FLOAT px, py; layout->HitTestTextPosition(idx16, FALSE, &px, &py, &m);
+                                float top = std::floor((m.top + lineHeight * 0.5f) / lineHeight) * lineHeight; rawRects.push_back(D2D1::RectF(px - 0.5f, top, px + charWidth, top + lineHeight));
+                            }
+                        }
+                    }
+                }
+            }
+            std::sort(rawRects.begin(), rawRects.end(), [](const D2D1_RECT_F& a, const D2D1_RECT_F& b) { if (std::abs(a.top - b.top) > 1.0f) return a.top < b.top; return a.left < b.left; });
+            std::vector<D2D1_RECT_F> mergedRects;
+            if (!rawRects.empty()) {
+                mergedRects.push_back(rawRects[0]);
+                for (size_t i = 1; i < rawRects.size(); ++i) {
+                    D2D1_RECT_F& curr = mergedRects.back(); const D2D1_RECT_F& next = rawRects[i];
+                    bool sameLine = std::abs(curr.top - next.top) < 1.0f; bool touches = next.left <= curr.right + 1.0f;
+                    if (sameLine && touches) { curr.right = std::max(curr.right, next.right); curr.bottom = std::max(curr.bottom, next.bottom); }
+                    else mergedRects.push_back(next);
+                }
+            }
+            if (!mergedRects.empty()) {
+                ID2D1RectangleGeometry* firstRect = nullptr; D2D1_RECT_F r = mergedRects[0]; r.left += hInset; r.top += vInset; r.right -= hInset; r.bottom -= vInset;
+                d2dFactory->CreateRectangleGeometry(&r, &firstRect); unifiedSelectionGeo = firstRect;
+                for (size_t i = 1; i < mergedRects.size(); ++i) {
+                    D2D1_RECT_F rNext = mergedRects[i]; rNext.left += hInset; rNext.top += vInset; rNext.right -= hInset; rNext.bottom -= vInset;
+                    ID2D1RectangleGeometry* nextGeo = nullptr; d2dFactory->CreateRectangleGeometry(&rNext, &nextGeo);
+                    ID2D1PathGeometry* pathGeo = nullptr; d2dFactory->CreatePathGeometry(&pathGeo);
+                    ID2D1GeometrySink* sink = nullptr; pathGeo->Open(&sink); unifiedSelectionGeo->CombineWithGeometry(nextGeo, D2D1_COMBINE_MODE_UNION, nullptr, sink);
+                    sink->Close(); sink->Release(); unifiedSelectionGeo->Release(); unifiedSelectionGeo = pathGeo; nextGeo->Release();
+                }
+                if (unifiedSelectionGeo) { rend->FillGeometry(unifiedSelectionGeo, selBrush); rend->DrawGeometry(unifiedSelectionGeo, selBrush, 8.0f, roundJoinStyle); unifiedSelectionGeo->Release(); }
+            }
+            if (isDragMoving) {
+                size_t relPos = (dragMoveDestPos > visibleStartOffset) ? dragMoveDestPos - visibleStartOffset : 0;
+                if (relPos <= text.size()) {
+                    std::string beforeCaret = text.substr(0, relPos); std::wstring wBefore = UTF8ToW(beforeCaret);
+                    DWRITE_HIT_TEST_METRICS m; FLOAT px, py; layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m); rend->DrawLine(D2D1::Point2F(px, py), D2D1::Point2F(px, py + lineHeight), caretBrush, 2.0f);
+                }
+            }
+            for (const auto& cursor : cursors) {
+                size_t head = cursor.head; size_t relHead = (head > visibleStartOffset) ? head - visibleStartOffset : 0;
+                if (hasIME && relHead >= caretOffsetInVisible) relHead += imeComp.size();
+                if (relHead <= text.size()) {
+                    std::string beforeCaret = text.substr(0, relHead); std::wstring wBefore = UTF8ToW(beforeCaret);
+                    DWRITE_HIT_TEST_METRICS m; FLOAT px, py; layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m); rend->DrawLine(D2D1::Point2F(px, py), D2D1::Point2F(px, py + lineHeight), caretBrush);
+                    if (&cursor == &cursors.back()) { imeCx = px; imeCy = py; }
+                }
+            }
+            selBrush->Release(); caretBrush->Release(); hlBrush->Release();
+            ID2D1SolidColorBrush* brush = nullptr; rend->CreateSolidColorBrush(textColor, &brush); rend->DrawTextLayout(D2D1::Point2F(0, 0), layout, brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT); brush->Release();
+            if (hasIME) {
+                std::string prefixUtf8 = text.substr(0, caretOffsetInVisible); std::wstring prefixWide = UTF8ToW(prefixUtf8); UINT32 imeStart = (UINT32)prefixWide.size(); std::wstring imeCompWide = UTF8ToW(imeComp); UINT32 imeLen = (UINT32)imeCompWide.size(); UINT32 count = 0; layout->HitTestTextRange(imeStart, imeLen, 0, 0, 0, 0, &count);
+                if (count > 0) {
+                    std::vector<DWRITE_HIT_TEST_METRICS> m(count); layout->HitTestTextRange(imeStart, imeLen, 0, 0, &m[0], count, &count);
+                    ID2D1SolidColorBrush* underlineBrush = nullptr; rend->CreateSolidColorBrush(textColor, &underlineBrush);
+                    for (const auto& mm : m) {
+                        float x = mm.left; float y = std::floor(mm.top + mm.height - 2.0f) + 0.5f; float w = mm.width;
+                        if (dotStyle) rend->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x + w, y), underlineBrush, 1.5f, dotStyle); else rend->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x + w, y), underlineBrush, 1.0f);
+                    }
+                    underlineBrush->Release();
+                }
+            }
+            layout->Release();
+        }
+        rend->SetTransform(D2D1::Matrix3x2F::Identity());
+        ID2D1SolidColorBrush* gutterBgBrush = nullptr; rend->CreateSolidColorBrush(gutterBg, &gutterBgBrush); rend->FillRectangle(D2D1::RectF(0, 0, gutterWidth, clientH), gutterBgBrush); gutterBgBrush->Release();
+        ID2D1SolidColorBrush* gutterTextBrush = nullptr; rend->CreateSolidColorBrush(gutterText, &gutterTextBrush);
+        int startLine = vScrollPos; int endLine = startLine + linesVisible; if (endLine > (int)lineStarts.size()) endLine = (int)lineStarts.size();
+        for (int i = startLine; i < endLine; i++) {
+            std::wstring numStr = std::to_wstring(i + 1); float yPos = (float)((i - startLine)) * lineHeight; IDWriteTextLayout* numLayout = nullptr;
+            if (SUCCEEDED(dwFactory->CreateTextLayout(numStr.c_str(), (UINT32)numStr.size(), textFormat, gutterWidth, lineHeight, &numLayout))) {
+                numLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING); rend->DrawTextLayout(D2D1::Point2F(0, yPos), numLayout, gutterTextBrush); numLayout->Release();
             }
         }
-        batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
-    }
-    void backspaceAtCursors() {
-        commitPadding(); if (cursors.empty()) return;
-        EditBatch batch; batch.beforeCursors = cursors;
-        std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return cursors[a].start() > cursors[b].start(); });
-        for (int idx : indices) {
-            Cursor& c = cursors[idx]; size_t start = c.start(); size_t len = 0;
-            if (c.hasSelection()) len = c.end() - start;
-            else if (start > 0) {
-                size_t prevPos = moveCaretVisual(start, false);
-                if (prevPos < start) { len = start - prevPos; start = prevPos; }
-            }
-            if (len > 0) {
-                std::string deleted = pt.getRange(start, len); pt.erase(start, len);
-                batch.ops.push_back({ EditOp::Erase, start, deleted });
-                for (auto& other : cursors) { if (other.head > start) other.head -= len; if (other.anchor > start) other.anchor -= len; }
-            }
+        gutterTextBrush->Release();
+        HIMC hIMC = ImmGetContext(hwnd); if (hIMC) { COMPOSITIONFORM cf = {}; cf.dwStyle = CFS_POINT; cf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cf.ptCurrentPos.y = (LONG)imeCy; ImmSetCompositionWindow(hIMC, &cf); CANDIDATEFORM cdf = {}; cdf.dwIndex = 0; cdf.dwStyle = CFS_CANDIDATEPOS; cdf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cdf.ptCurrentPos.y = (LONG)(imeCy + lineHeight); ImmSetCandidateWindow(hIMC, &cdf); ImmReleaseContext(hwnd, hIMC); }
+        if (GetTickCount() < zoomPopupEndTime) {
+            D2D1_RECT_F popupRect = D2D1::RectF(clientW / 2 - 80, clientH / 2 - 40, clientW / 2 + 80, clientH / 2 + 40);
+            ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.7f), &popupBg);
+            ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
+            rend->FillRoundedRectangle(D2D1::RoundedRect(popupRect, 10.0f, 10.0f), popupBg);
+            if (popupTextFormat) rend->DrawText(zoomPopupText.c_str(), (UINT32)zoomPopupText.size(), popupTextFormat, popupRect, popupText);
+            popupBg->Release(); popupText->Release();
         }
-        batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
+        rend->EndDraw(); EndPaint(hwnd, &ps);
     }
-    void copyToClipboard() {
-        std::string text = ""; std::vector<Cursor> sorted = cursors;
-        std::sort(sorted.begin(), sorted.end(), [](const Cursor& a, const Cursor& b) { return a.start() < b.start(); });
-        for (size_t i = 0; i < sorted.size(); ++i) {
-            const auto& c = sorted[i]; if (c.hasSelection()) text += pt.getRange(c.start(), c.end() - c.start());
-            if (i < sorted.size() - 1 && c.hasSelection()) text += "\r\n";
-        }
-        if (text.empty()) return;
-        if (OpenClipboard(hwnd)) {
-            EmptyClipboard(); std::wstring wText = UTF8ToW(text);
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (wText.size() + 1) * sizeof(wchar_t));
-            if (hMem) { void* ptr = GlobalLock(hMem); memcpy(ptr, wText.c_str(), (wText.size() + 1) * sizeof(wchar_t)); GlobalUnlock(hMem); SetClipboardData(CF_UNICODETEXT, hMem); }
-            CloseClipboard();
-        }
-    }
-    void pasteFromClipboard() {
-        if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return;
-        if (OpenClipboard(hwnd)) {
-            HGLOBAL hMem = GetClipboardData(CF_UNICODETEXT);
-            if (hMem) { const wchar_t* ptr = (const wchar_t*)GlobalLock(hMem); if (ptr) { std::wstring wText(ptr); GlobalUnlock(hMem); insertAtCursors(WToUTF8(wText)); } }
-            CloseClipboard();
-        }
-    }
+    void insertAtCursors(const std::string& text) { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; if (c.hasSelection()) { size_t s = c.start(); size_t l = c.end() - s; std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; }c.head = s; c.anchor = s; } } for (int idx : indices) { Cursor& c = cursors[idx]; size_t p = c.head; pt.insert(p, text); batch.ops.push_back({ EditOp::Insert,p,text }); size_t l = text.size(); for (auto& o : cursors) { if (o.head >= p)o.head += l; if (o.anchor >= p)o.anchor += l; } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    void deleteForwardAtCursors() { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; size_t s = c.start(); size_t l = 0; if (c.hasSelection())l = c.end() - s; else { size_t n = moveCaretVisual(s, true); if (n > s)l = n - s; }if (l > 0 && s + l <= pt.length()) { std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; }c.head = s; c.anchor = s; } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    void backspaceAtCursors() { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; size_t s = c.start(); size_t l = 0; if (c.hasSelection())l = c.end() - s; else if (s > 0) { size_t p = moveCaretVisual(s, false); if (p < s) { l = s - p; s = p; } }if (l > 0) { std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; } } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    void copyToClipboard() { std::string t; std::vector<Cursor> s = cursors; std::sort(s.begin(), s.end(), [](const Cursor& a, const Cursor& b) {return a.start() < b.start(); }); for (size_t i = 0; i < s.size(); ++i) { if (s[i].hasSelection())t += pt.getRange(s[i].start(), s[i].end() - s[i].start()); if (i < s.size() - 1 && s[i].hasSelection())t += "\r\n"; }if (t.empty())return; if (OpenClipboard(hwnd)) { EmptyClipboard(); std::wstring w = UTF8ToW(t); HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * sizeof(wchar_t)); if (h) { void* p = GlobalLock(h); memcpy(p, w.c_str(), (w.size() + 1) * sizeof(wchar_t)); GlobalUnlock(h); SetClipboardData(CF_UNICODETEXT, h); }CloseClipboard(); } }
+    void pasteFromClipboard() { if (!IsClipboardFormatAvailable(CF_UNICODETEXT))return; if (OpenClipboard(hwnd)) { HGLOBAL h = GetClipboardData(CF_UNICODETEXT); if (h) { const wchar_t* p = (const wchar_t*)GlobalLock(h); if (p) { std::wstring w(p); GlobalUnlock(h); insertAtCursors(WToUTF8(w)); } }CloseClipboard(); } }
     void cutToClipboard() { copyToClipboard(); insertAtCursors(""); }
     void doInsert(size_t pos, const std::string& s) { cursors.clear(); cursors.push_back({ pos, pos, getXFromPos(pos) }); insertAtCursors(s); }
-    void performUndo() {
-        if (!undo.canUndo()) return; EditBatch b = undo.popUndo();
-        for (int i = (int)b.ops.size() - 1; i >= 0; --i) { const auto& op = b.ops[i]; if (op.type == EditOp::Insert) pt.erase(op.pos, op.text.size()); else pt.insert(op.pos, op.text); }
-        cursors = b.beforeCursors; rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
-    }
-    void performRedo() {
-        if (!undo.canRedo()) return; EditBatch b = undo.popRedo();
-        for (const auto& op : b.ops) { if (op.type == EditOp::Insert) pt.insert(op.pos, op.text); else pt.erase(op.pos, op.text.size()); }
-        cursors = b.afterCursors; rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag();
-    }
-    int ShowTaskDialog(const wchar_t* title, const wchar_t* instruction, const wchar_t* content, TASKDIALOG_COMMON_BUTTON_FLAGS buttons, PCWSTR icon) {
-        TASKDIALOGCONFIG config = { 0 }; config.cbSize = sizeof(config); config.hwndParent = hwnd; config.hInstance = GetModuleHandle(NULL);
-        config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-        config.pszWindowTitle = title; config.pszMainInstruction = instruction; config.pszContent = content; config.dwCommonButtons = buttons; config.pszMainIcon = icon;
-        int nButtonPressed = 0; TaskDialogIndirect(&config, &nButtonPressed, NULL, NULL); return nButtonPressed;
-    }
-    bool checkUnsavedChanges() {
-        if (!isDirty) return true;
-        int result = ShowTaskDialog(L"確認", L"変更を保存しますか?", currentFilePath.empty() ? L"無題のファイルへの変更内容を保存しますか?" : (L"ファイル '" + currentFilePath + L"' への変更内容を保存しますか?").c_str(), TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON, TD_WARNING_ICON);
-        if (result == IDCANCEL) return false;
-        if (result == IDYES) { if (currentFilePath.empty()) return saveFileAs(); else return saveFile(currentFilePath); }
-        return true;
-    }
-    bool openFile() {
-        if (!checkUnsavedChanges()) return false;
-        WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-        if (GetOpenFileNameW(&ofn) == TRUE) {
-            fileMap.reset(new MappedFile());
-            if (fileMap->open(szFile)) {
-                pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = szFile; undo.clear(); isDirty = false; undo.markSaved(); cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0; rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); return true;
-            }
-            else ShowTaskDialog(L"エラー", L"ファイルを開けませんでした。", szFile, TDCBF_OK_BUTTON, TD_ERROR_ICON);
-        }
-        return false;
-    }
-    bool saveFile(const std::wstring& path) {
-        std::wstring tempPath = path + L".tmp";
-        HANDLE hTemp = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hTemp == INVALID_HANDLE_VALUE) { ShowTaskDialog(L"エラー", L"一時ファイルを作成できませんでした。", tempPath.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON); return false; }
-        bool success = true;
-        for (const auto& p : pt.pieces) {
-            const char* dataPtr = p.isOriginal ? (pt.origPtr + p.start) : (pt.addBuf.data() + p.start);
-            DWORD written = 0; if (!WriteFile(hTemp, dataPtr, (DWORD)p.len, &written, NULL) || written != p.len) { success = false; break; }
-        }
-        CloseHandle(hTemp);
-        if (!success) { DeleteFileW(tempPath.c_str()); ShowTaskDialog(L"エラー", L"書き込みに失敗しました。", path.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON); return false; }
-        if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { ShowTaskDialog(L"エラー", L"ファイルを上書きできませんでした。", L"ファイルが他のプロセスによってロックされている可能性があります。", TDCBF_OK_BUTTON, TD_ERROR_ICON); DeleteFileW(tempPath.c_str()); return false; }
-        currentFilePath = path; undo.markSaved(); updateDirtyFlag(); return true;
-    }
-    bool saveFileAs() {
-        WCHAR szFile[MAX_PATH] = { 0 }; OPENFILENAMEW ofn = { 0 }; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile); ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
-        if (GetSaveFileNameW(&ofn) == TRUE) return saveFile(szFile); return false;
-    }
-    void newFile() {
-        if (!checkUnsavedChanges()) return;
-        pt.initEmpty(); currentFilePath.clear(); undo.clear(); isDirty = false; cursors.clear(); cursors.push_back({ 0, 0, 0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE);
-    }
+    void performUndo() { if (!undo.canUndo())return; EditBatch b = undo.popUndo(); for (int i = (int)b.ops.size() - 1; i >= 0; --i) { const auto& o = b.ops[i]; if (o.type == EditOp::Insert)pt.erase(o.pos, o.text.size()); else pt.insert(o.pos, o.text); }cursors = b.beforeCursors; rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    void performRedo() { if (!undo.canRedo())return; EditBatch b = undo.popRedo(); for (const auto& o : b.ops) { if (o.type == EditOp::Insert)pt.insert(o.pos, o.text); else pt.erase(o.pos, o.text.size()); }cursors = b.afterCursors; rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    int ShowTaskDialog(const wchar_t* title, const wchar_t* instruction, const wchar_t* content, TASKDIALOG_COMMON_BUTTON_FLAGS buttons, PCWSTR icon) { TASKDIALOGCONFIG c = { 0 }; c.cbSize = sizeof(c); c.hwndParent = hwnd; c.hInstance = GetModuleHandle(NULL); c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW; c.pszWindowTitle = title; c.pszMainInstruction = instruction; c.pszContent = content; c.dwCommonButtons = buttons; c.pszMainIcon = icon; int n = 0; TaskDialogIndirect(&c, &n, NULL, NULL); return n; }
+    bool checkUnsavedChanges() { if (!isDirty)return true; int r = ShowTaskDialog(L"確認", L"変更を保存しますか?", currentFilePath.empty() ? L"無題" : currentFilePath.c_str(), TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON, TD_WARNING_ICON); if (r == IDCANCEL)return false; if (r == IDYES) { if (currentFilePath.empty())return saveFileAs(); else return saveFile(currentFilePath); }return true; }
+    bool openFile() { if (!checkUnsavedChanges())return false; WCHAR f[MAX_PATH] = { 0 }; OPENFILENAMEW o = { 0 }; o.lStructSize = sizeof(o); o.hwndOwner = hwnd; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrFilter = L"All\0*.*\0Text\0*.txt\0"; o.nFilterIndex = 1; o.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST; if (GetOpenFileNameW(&o)) { fileMap.reset(new MappedFile()); if (fileMap->open(f)) { pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = f; undo.clear(); isDirty = false; undo.markSaved(); cursors.clear(); cursors.push_back({ 0,0,0.0f }); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); return true; } else ShowTaskDialog(L"エラー", L"開けません", f, TDCBF_OK_BUTTON, TD_ERROR_ICON); }return false; }
+    bool saveFile(const std::wstring& p) { std::wstring t = p + L".tmp"; HANDLE h = CreateFileW(t.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); if (h == INVALID_HANDLE_VALUE)return false; bool ok = true; for (const auto& piece : pt.pieces) { const char* ptr = piece.isOriginal ? (pt.origPtr + piece.start) : (pt.addBuf.data() + piece.start); DWORD w = 0; if (!WriteFile(h, ptr, (DWORD)piece.len, &w, NULL) || w != piece.len) { ok = false; break; } }CloseHandle(h); if (!ok) { DeleteFileW(t.c_str()); return false; }if (MoveFileExW(t.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { DeleteFileW(t.c_str()); return false; }currentFilePath = p; undo.markSaved(); updateDirtyFlag(); return true; }
+    bool saveFileAs() { WCHAR f[MAX_PATH] = { 0 }; OPENFILENAMEW o = { 0 }; o.lStructSize = sizeof(o); o.hwndOwner = hwnd; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrFilter = L"All\0*.*\0Text\0*.txt\0"; o.nFilterIndex = 1; o.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT; if (GetSaveFileNameW(&o))return saveFile(f); return false; }
+    void newFile() { if (!checkUnsavedChanges())return; pt.initEmpty(); currentFilePath.clear(); undo.clear(); isDirty = false; cursors.clear(); cursors.push_back({ 0,0,0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); }
 } g_editor;
 
-// --- Win32 Boilerplate ---
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: g_editor.initGraphics(hwnd); break;
-    case WM_SIZE: if (g_editor.rend) { RECT rc; GetClientRect(hwnd, &rc); D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top); g_editor.rend->Resize(size); g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE); } break;
+    case WM_SIZE: if (g_editor.rend) { RECT rc; GetClientRect(hwnd, &rc); g_editor.rend->Resize(D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)); g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE); } break;
     case WM_LBUTTONDOWN: {
-        int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam); SetCapture(hwnd); g_editor.isDragging = true; g_editor.rollbackPadding();
-        DWORD curTime = GetMessageTime(); bool samePos = (abs(x - g_editor.lastClickX) < 5 && abs(y - g_editor.lastClickY) < 5);
-        if (samePos && (curTime - g_editor.lastClickTime < GetDoubleClickTime())) g_editor.clickCount++; else g_editor.clickCount = 1;
-        g_editor.lastClickTime = curTime; g_editor.lastClickX = x; g_editor.lastClickY = y;
-        float dipX = x / g_editor.dpiScaleX; float dipY = y / g_editor.dpiScaleY;
-        if (g_editor.clickCount == 1 && !(GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000) && !(GetKeyState(VK_CONTROL) & 0x8000)) {
-            size_t clickedPos = g_editor.getDocPosFromPoint(x, y);
-            bool insideSelection = false; size_t selStart = 0, selEnd = 0;
-            for (const auto& c : g_editor.cursors) { if (c.hasSelection() && clickedPos >= c.start() && clickedPos < c.end()) { insideSelection = true; selStart = c.start(); selEnd = c.end(); break; } }
-            if (insideSelection) { g_editor.isDragMovePending = true; g_editor.dragMoveSourceStart = selStart; g_editor.dragMoveSourceEnd = selEnd; return 0; }
+        int x = (short)LOWORD(lParam), y = (short)HIWORD(lParam); SetCapture(hwnd); g_editor.isDragging = true; g_editor.rollbackPadding();
+        if (abs(x - g_editor.lastClickX) < 5 && abs(y - g_editor.lastClickY) < 5 && (GetMessageTime() - g_editor.lastClickTime < GetDoubleClickTime())) g_editor.clickCount++; else g_editor.clickCount = 1;
+        g_editor.lastClickTime = GetMessageTime(); g_editor.lastClickX = x; g_editor.lastClickY = y;
+        if (g_editor.clickCount == 1 && !(GetKeyState(VK_SHIFT) & 0x8000)) {
+            size_t p = g_editor.getDocPosFromPoint(x, y);
+            bool inSel = false; for (const auto& c : g_editor.cursors) if (c.hasSelection() && p >= c.start() && p < c.end()) inSel = true;
+            if (inSel) { g_editor.isDragMovePending = true; g_editor.dragMoveSourceStart = g_editor.cursors.back().start(); g_editor.dragMoveSourceEnd = g_editor.cursors.back().end(); return 0; }
         }
         g_editor.isDragMovePending = false; g_editor.isDragMoving = false;
-        if (GetKeyState(VK_MENU) & 0x8000) {
-            g_editor.isRectSelecting = true; float virtualX = dipX - g_editor.gutterWidth + g_editor.hScrollPos; float virtualY = dipY + (g_editor.vScrollPos * g_editor.lineHeight);
-            g_editor.rectAnchorX = virtualX; g_editor.rectAnchorY = virtualY; g_editor.rectHeadX = virtualX; g_editor.rectHeadY = virtualY;
-            g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
-        }
+        if (GetKeyState(VK_MENU) & 0x8000) { g_editor.isRectSelecting = true; float vx = x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos; float vy = y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight); g_editor.rectAnchorX = g_editor.rectHeadX = vx; g_editor.rectAnchorY = g_editor.rectHeadY = vy; g_editor.updateRectSelection(); }
         else g_editor.isRectSelecting = false;
-        if (dipX < g_editor.gutterWidth) {
-            int clickedLine = g_editor.vScrollPos + (int)(dipY / g_editor.lineHeight);
-            if (clickedLine >= 0 && clickedLine < (int)g_editor.lineStarts.size()) {
-                size_t start = g_editor.lineStarts[clickedLine]; size_t end = (clickedLine + 1 < (int)g_editor.lineStarts.size()) ? g_editor.lineStarts[clickedLine + 1] : g_editor.pt.length();
-                if (GetKeyState(VK_SHIFT) & 0x8000 && !g_editor.cursors.empty()) { g_editor.cursors.clear(); g_editor.cursors.push_back({ end, start, g_editor.getXFromPos(end) }); }
-                else { g_editor.cursors.clear(); g_editor.cursors.push_back({ end, start, g_editor.getXFromPos(end) }); }
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
+        if (x / g_editor.dpiScaleX < g_editor.gutterWidth) {
+            int line = g_editor.vScrollPos + (int)(y / g_editor.dpiScaleY / g_editor.lineHeight);
+            if (line >= 0 && line < (int)g_editor.lineStarts.size()) { size_t s = g_editor.lineStarts[line]; size_t e = (line + 1 < (int)g_editor.lineStarts.size()) ? g_editor.lineStarts[line + 1] : g_editor.pt.length(); g_editor.cursors.clear(); g_editor.cursors.push_back({ e, s, g_editor.getXFromPos(e) }); }
         }
         else {
-            size_t clickedPos = g_editor.getDocPosFromPoint(x, y);
-            if (g_editor.clickCount == 2) g_editor.selectWordAt(clickedPos);
-            else if (g_editor.clickCount == 3) g_editor.selectLineAt(clickedPos);
-            else {
-                if (GetKeyState(VK_SHIFT) & 0x8000) { if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = clickedPos; g_editor.cursors.back().desiredX = g_editor.getXFromPos(clickedPos); } }
-                else if (GetKeyState(VK_CONTROL) & 0x8000) g_editor.cursors.push_back({ clickedPos, clickedPos, g_editor.getXFromPos(clickedPos) });
-                else { g_editor.cursors.clear(); g_editor.cursors.push_back({ clickedPos, clickedPos, g_editor.getXFromPos(clickedPos) }); }
-            }
-            InvalidateRect(hwnd, NULL, FALSE);
+            size_t p = g_editor.getDocPosFromPoint(x, y);
+            if (g_editor.clickCount == 2) g_editor.selectWordAt(p); else if (g_editor.clickCount == 3) g_editor.selectLineAt(p);
+            else { if (GetKeyState(VK_SHIFT) & 0x8000) { if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = p; g_editor.cursors.back().desiredX = g_editor.getXFromPos(p); } } else if (GetKeyState(VK_CONTROL) & 0x8000) g_editor.cursors.push_back({ p, p, g_editor.getXFromPos(p) }); else { g_editor.cursors.clear(); g_editor.cursors.push_back({ p, p, g_editor.getXFromPos(p) }); } }
         }
+        InvalidateRect(hwnd, NULL, FALSE);
     } break;
     case WM_MOUSEMOVE: {
-        int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam); float dipX = x / g_editor.dpiScaleX; float dipY = y / g_editor.dpiScaleY;
+        int x = (short)LOWORD(lParam), y = (short)HIWORD(lParam);
         if (g_editor.isDragMovePending) { if (abs(x - g_editor.lastClickX) > 5 || abs(y - g_editor.lastClickY) > 5) { g_editor.isDragMovePending = false; g_editor.isDragMoving = true; SetCursor(LoadCursor(NULL, IDC_ARROW)); } }
         if (g_editor.isDragMoving) { g_editor.dragMoveDestPos = g_editor.getDocPosFromPoint(x, y); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-        if (g_editor.isDragging && !g_editor.isDragMoving && !g_editor.isDragMovePending) {
-            if (g_editor.isRectSelecting) { float virtualX = dipX - g_editor.gutterWidth + g_editor.hScrollPos; float virtualY = dipY + (g_editor.vScrollPos * g_editor.lineHeight); g_editor.rectHeadX = virtualX; g_editor.rectHeadY = virtualY; g_editor.updateRectSelection(); }
-            else { size_t pos = g_editor.getDocPosFromPoint(x, y); if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = pos; g_editor.cursors.back().desiredX = g_editor.getXFromPos(pos); } }
+        if (g_editor.isDragging) {
+            if (g_editor.isRectSelecting) { float vx = x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos; float vy = y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight); g_editor.rectHeadX = vx; g_editor.rectHeadY = vy; g_editor.updateRectSelection(); }
+            else { size_t p = g_editor.getDocPosFromPoint(x, y); if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = p; g_editor.cursors.back().desiredX = g_editor.getXFromPos(p); } }
             InvalidateRect(hwnd, NULL, FALSE);
         }
     } break;
-    case WM_LBUTTONUP: {
-        if (g_editor.isDragMovePending) {
-            g_editor.isDragMovePending = false; size_t clickedPos = g_editor.getDocPosFromPoint((short)LOWORD(lParam), (short)HIWORD(lParam));
-            g_editor.cursors.clear(); g_editor.cursors.push_back({ clickedPos, clickedPos, g_editor.getXFromPos(clickedPos) });
-            InvalidateRect(hwnd, NULL, FALSE); g_editor.isDragging = false; ReleaseCapture();
-        }
-        else if (g_editor.isDragMoving) { g_editor.performDragMove(); g_editor.isDragMoving = false; g_editor.isDragging = false; ReleaseCapture(); }
-        else if (g_editor.isDragging) { ReleaseCapture(); g_editor.isDragging = false; g_editor.isRectSelecting = false; g_editor.mergeCursors(); }
-    } break;
+    case WM_LBUTTONUP:
+        if (g_editor.isDragMovePending) { g_editor.isDragMovePending = false; size_t p = g_editor.getDocPosFromPoint((short)LOWORD(lParam), (short)HIWORD(lParam)); g_editor.cursors.clear(); g_editor.cursors.push_back({ p, p, g_editor.getXFromPos(p) }); InvalidateRect(hwnd, NULL, FALSE); }
+        else if (g_editor.isDragMoving) { g_editor.performDragMove(); }
+        g_editor.isDragging = false; g_editor.isDragMoving = false; g_editor.isRectSelecting = false; g_editor.mergeCursors(); ReleaseCapture(); break;
     case WM_VSCROLL: {
-        int action = LOWORD(wParam); RECT rc; GetClientRect(hwnd, &rc); int page = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); int maxPos = (int)g_editor.lineStarts.size();
-    switch (action) { case SB_LINEUP: g_editor.vScrollPos -= 1; break; case SB_LINEDOWN: g_editor.vScrollPos += 1; break; case SB_PAGEUP: g_editor.vScrollPos -= page; break; case SB_PAGEDOWN: g_editor.vScrollPos += page; break; case SB_THUMBTRACK: SCROLLINFO si; si.cbSize = sizeof(si); si.fMask = SIF_TRACKPOS; GetScrollInfo(hwnd, SB_VERT, &si); g_editor.vScrollPos = si.nTrackPos; break; }
-                                    if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0; if (g_editor.vScrollPos > maxPos) g_editor.vScrollPos = maxPos; g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
+        RECT rc; GetClientRect(hwnd, &rc); int page = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight);
+    switch (LOWORD(wParam)) { case SB_LINEUP: g_editor.vScrollPos--; break; case SB_LINEDOWN: g_editor.vScrollPos++; break; case SB_PAGEUP: g_editor.vScrollPos -= page; break; case SB_PAGEDOWN: g_editor.vScrollPos += page; break; case SB_THUMBTRACK: { SCROLLINFO si = { sizeof(SCROLLINFO), SIF_TRACKPOS }; GetScrollInfo(hwnd, SB_VERT, &si); g_editor.vScrollPos = si.nTrackPos; } break; }
+                                            if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0; if (g_editor.vScrollPos > (int)g_editor.lineStarts.size()) g_editor.vScrollPos = (int)g_editor.lineStarts.size(); g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
     } break;
     case WM_HSCROLL: {
-        int action = LOWORD(wParam); int page = 100;
-    switch (action) { case SB_LINELEFT: g_editor.hScrollPos -= 10; break; case SB_LINERIGHT: g_editor.hScrollPos += 10; break; case SB_PAGELEFT: g_editor.hScrollPos -= page; break; case SB_PAGERIGHT: g_editor.hScrollPos += page; break; case SB_THUMBTRACK: SCROLLINFO si; si.cbSize = sizeof(si); si.fMask = SIF_TRACKPOS; GetScrollInfo(hwnd, SB_HORZ, &si); g_editor.hScrollPos = si.nTrackPos; break; }
-                                      if (g_editor.hScrollPos < 0) g_editor.hScrollPos = 0; if (g_editor.hScrollPos > (int)g_editor.maxLineWidth) g_editor.hScrollPos = (int)g_editor.maxLineWidth; g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
+    switch (LOWORD(wParam)) { case SB_LINELEFT: g_editor.hScrollPos -= 10; break; case SB_LINERIGHT: g_editor.hScrollPos += 10; break; case SB_PAGELEFT: g_editor.hScrollPos -= 100; break; case SB_PAGERIGHT: g_editor.hScrollPos += 100; break; case SB_THUMBTRACK: { SCROLLINFO si = { sizeof(SCROLLINFO), SIF_TRACKPOS }; GetScrollInfo(hwnd, SB_HORZ, &si); g_editor.hScrollPos = si.nTrackPos; } break; }
+                                              if (g_editor.hScrollPos < 0) g_editor.hScrollPos = 0; g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
     } break;
-    case WM_MOUSEWHEEL: {
-        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+    case WM_MOUSEWHEEL:
         if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
-            float oldSize = g_editor.currentFontSize; float scale = (delta > 0) ? 1.1f : 0.9f; g_editor.updateFont(oldSize * scale);
-            g_editor.zoomPopupEndTime = GetTickCount() + 1000; std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str(); SetTimer(hwnd, 1, 1000, NULL); InvalidateRect(hwnd, NULL, FALSE);
+            float s = (GET_WHEEL_DELTA_WPARAM(wParam) > 0) ? 1.1f : 0.9f; g_editor.updateFont(g_editor.currentFontSize * s);
+            g_editor.zoomPopupEndTime = GetTickCount() + 1000; std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str(); SetTimer(hwnd, 1, 1000, NULL);
         }
         else {
-            int lines = -delta / WHEEL_DELTA * 3; g_editor.vScrollPos += lines; int maxPos = (int)g_editor.lineStarts.size();
-            if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0; if (g_editor.vScrollPos > maxPos) g_editor.vScrollPos = maxPos;
-            g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE);
+            g_editor.vScrollPos -= GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * 3;
+            if (g_editor.vScrollPos < 0) g_editor.vScrollPos = 0; if (g_editor.vScrollPos > (int)g_editor.lineStarts.size()) g_editor.vScrollPos = (int)g_editor.lineStarts.size();
+            g_editor.updateScrollBars();
         }
-    } break;
-    case WM_TIMER: { if (wParam == 1) { KillTimer(hwnd, 1); InvalidateRect(hwnd, NULL, FALSE); } } break;
+        InvalidateRect(hwnd, NULL, FALSE); break;
+    case WM_TIMER: if (wParam == 1) { KillTimer(hwnd, 1); InvalidateRect(hwnd, NULL, FALSE); } break;
     case WM_CHAR: {
-        wchar_t ch = (wchar_t)wParam; if (ch == 3 || ch == 26 || ch == 1 || ch == 15 || ch == 19 || ch == 14 || ch == 6) break; // Skip Ctrl+C,Z,A,O,S,N,F
-        if (ch == 8) { g_editor.highSurrogate = 0; g_editor.backspaceAtCursors(); }
-        else if (ch == '\r') { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
-        else if (ch >= 32) {
-            if (ch >= 0xD800 && ch <= 0xDBFF) { g_editor.highSurrogate = ch; return 0; }
-            std::wstring ws; if (ch >= 0xDC00 && ch <= 0xDFFF) { if (g_editor.highSurrogate) { ws.push_back(g_editor.highSurrogate); ws.push_back(ch); g_editor.highSurrogate = 0; } else return 0; }
-            else { g_editor.highSurrogate = 0; ws.push_back(ch); }
-            g_editor.insertAtCursors(WToUTF8(ws));
+        wchar_t c = (wchar_t)wParam; if (c < 32 && c != 8 && c != 13) break;
+        if (c == 8) { g_editor.highSurrogate = 0; g_editor.backspaceAtCursors(); }
+        else if (c == 13) { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
+        else {
+            if (c >= 0xD800 && c <= 0xDBFF) { g_editor.highSurrogate = c; return 0; }
+            std::wstring s; if (c >= 0xDC00 && c <= 0xDFFF) { if (g_editor.highSurrogate) { s += g_editor.highSurrogate; s += c; g_editor.highSurrogate = 0; } else return 0; }
+            else { g_editor.highSurrogate = 0; s += c; }
+            g_editor.insertAtCursors(WToUTF8(s));
         }
     } break;
     case WM_IME_STARTCOMPOSITION: return 0;
     case WM_IME_COMPOSITION: {
-        HIMC hIMC = ImmGetContext(hwnd);
-        if (hIMC) {
-            if (lParam & GCS_RESULTSTR) { DWORD size = ImmGetCompositionStringW(hIMC, GCS_RESULTSTR, NULL, 0); if (size > 0) { std::vector<wchar_t> buf(size / sizeof(wchar_t)); ImmGetCompositionStringW(hIMC, GCS_RESULTSTR, buf.data(), size); std::wstring ws(buf.begin(), buf.end()); g_editor.insertAtCursors(WToUTF8(ws)); g_editor.imeComp.clear(); } }
-            if (lParam & GCS_COMPSTR) { DWORD size = ImmGetCompositionStringW(hIMC, GCS_COMPSTR, NULL, 0); if (size > 0) { std::vector<wchar_t> buf(size / sizeof(wchar_t)); ImmGetCompositionStringW(hIMC, GCS_COMPSTR, buf.data(), size); std::wstring ws(buf.begin(), buf.end()); g_editor.imeComp = WToUTF8(ws); } else { g_editor.imeComp.clear(); } }
-            ImmReleaseContext(hwnd, hIMC); InvalidateRect(hwnd, NULL, FALSE); return 0;
-        }
+        HIMC h = ImmGetContext(hwnd); if (h) {
+            if (lParam & GCS_RESULTSTR) { DWORD s = ImmGetCompositionStringW(h, GCS_RESULTSTR, NULL, 0); if (s) { std::vector<wchar_t> b(s / 2); ImmGetCompositionStringW(h, GCS_RESULTSTR, b.data(), s); g_editor.insertAtCursors(WToUTF8(std::wstring(b.begin(), b.end()))); g_editor.imeComp.clear(); } }
+            if (lParam & GCS_COMPSTR) { DWORD s = ImmGetCompositionStringW(h, GCS_COMPSTR, NULL, 0); if (s) { std::vector<wchar_t> b(s / 2); ImmGetCompositionStringW(h, GCS_COMPSTR, b.data(), s); g_editor.imeComp = WToUTF8(std::wstring(b.begin(), b.end())); } else g_editor.imeComp.clear(); }
+            ImmReleaseContext(hwnd, h); InvalidateRect(hwnd, NULL, FALSE);
+        } return 0;
     } break;
     case WM_IME_ENDCOMPOSITION: g_editor.imeComp.clear(); InvalidateRect(hwnd, NULL, FALSE); break;
     case WM_IME_SETCONTEXT: lParam &= ~ISC_SHOWUICOMPOSITIONWINDOW; return DefWindowProc(hwnd, msg, wParam, lParam);
     case WM_SYSKEYDOWN: if (wParam != VK_LEFT && wParam != VK_RIGHT && wParam != VK_UP && wParam != VK_DOWN) return DefWindowProc(hwnd, msg, wParam, lParam);
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'F') g_editor.showFindDialog();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'O') g_editor.openFile();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'N') g_editor.newFile();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') { if (g_editor.currentFilePath.empty()) g_editor.saveFileAs(); else g_editor.saveFile(g_editor.currentFilePath); }
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') g_editor.performUndo();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') g_editor.performRedo();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == 'C' || wParam == VK_INSERT)) g_editor.copyToClipboard();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'X') g_editor.cutToClipboard();
-        else if (((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'V') || ((GetKeyState(VK_SHIFT) & 0x8000) && wParam == VK_INSERT)) g_editor.pasteFromClipboard();
-        else if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'A') { g_editor.rollbackPadding(); g_editor.cursors.clear(); g_editor.cursors.push_back({ g_editor.pt.length(), 0, 0.0f }); InvalidateRect(hwnd, NULL, FALSE); }
-        else if (wParam == VK_ESCAPE) { g_editor.rollbackPadding(); if (!g_editor.cursors.empty()) { Cursor last = g_editor.cursors.back(); last.anchor = last.head; g_editor.cursors.clear(); g_editor.cursors.push_back(last); g_editor.isRectSelecting = false; InvalidateRect(hwnd, NULL, FALSE); } }
-        else if (wParam == VK_LEFT) {
-            bool isAlt = (GetKeyState(VK_MENU) & 0x8000) != 0; bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0; bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            if (isAlt && isShift) {
-                if (!g_editor.isRectSelecting) { g_editor.isRectSelecting = true; float x, y; g_editor.getCaretPoint(x, y); float contentX = (x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos); float contentY = (y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight)); g_editor.rectAnchorX = g_editor.rectHeadX = contentX; g_editor.rectAnchorY = g_editor.rectHeadY = contentY; }
-                g_editor.rectHeadX -= g_editor.charWidth; g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+        // Shortcuts
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
+            switch (wParam) {
+            case 'F': g_editor.showFindDialog(false); return 0;
+            case 'H': g_editor.showFindDialog(true); return 0;
+            case 'O': g_editor.openFile(); return 0;
+            case 'N': g_editor.newFile(); return 0;
+            case 'S': if (g_editor.currentFilePath.empty()) g_editor.saveFileAs(); else g_editor.saveFile(g_editor.currentFilePath); return 0;
+            case 'Z': g_editor.performUndo(); return 0;
+            case 'Y': g_editor.performRedo(); return 0;
+            case 'C': case VK_INSERT: g_editor.copyToClipboard(); return 0;
+            case 'X': g_editor.cutToClipboard(); return 0;
+            case 'V': g_editor.pasteFromClipboard(); return 0;
+            case 'A': { g_editor.rollbackPadding(); g_editor.cursors.clear(); g_editor.cursors.push_back({ g_editor.pt.length(), 0, 0.0f }); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+            default: break; // Fall through for Ctrl+Nav keys
             }
+        }
+
+        if ((GetKeyState(VK_SHIFT) & 0x8000) && wParam == VK_INSERT) { g_editor.pasteFromClipboard(); return 0; }
+        if (wParam == VK_ESCAPE) { g_editor.rollbackPadding(); if (!g_editor.cursors.empty()) { Cursor c = g_editor.cursors.back(); c.anchor = c.head; g_editor.cursors.clear(); g_editor.cursors.push_back(c); g_editor.isRectSelecting = false; InvalidateRect(hwnd, NULL, FALSE); } return 0; }
+        if (wParam == VK_DELETE) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; g_editor.deleteForwardAtCursors(); return 0; }
+
+        // Navigation
+        if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN ||
+            wParam == VK_HOME || wParam == VK_END || wParam == VK_PRIOR || wParam == VK_NEXT) {
+
+            bool shift = (GetKeyState(VK_SHIFT) & 0x8000);
+            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000);
+            bool alt = (GetKeyState(VK_MENU) & 0x8000);
+
+            if (alt && shift && (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN)) {
+                if (!g_editor.isRectSelecting) { g_editor.isRectSelecting = true; float vx = 0, vy = 0; g_editor.getCaretPoint(vx, vy); g_editor.rectAnchorX = g_editor.rectHeadX = vx / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos; g_editor.rectAnchorY = g_editor.rectHeadY = vy / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight); }
+                if (wParam == VK_LEFT) g_editor.rectHeadX -= g_editor.charWidth; if (wParam == VK_RIGHT) g_editor.rectHeadX += g_editor.charWidth;
+                if (wParam == VK_UP) g_editor.rectHeadY -= g_editor.lineHeight; if (wParam == VK_DOWN) g_editor.rectHeadY += g_editor.lineHeight;
+                g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+            }
+
             g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
             for (auto& c : g_editor.cursors) {
-                if (c.hasSelection() && !isShift) { c.head = c.start(); c.anchor = c.head; }
-                else { if (isCtrl) c.head = g_editor.moveWordLeft(c.head); else c.head = g_editor.moveCaretVisual(c.head, false); if (!isShift) c.anchor = c.head; }
-                c.desiredX = g_editor.getXFromPos(c.head);
+                if (wParam == VK_LEFT) { if (c.hasSelection() && !shift) { c.head = c.start(); c.anchor = c.head; } else { if (ctrl) c.head = g_editor.moveWordLeft(c.head); else c.head = g_editor.moveCaretVisual(c.head, false); if (!shift) c.anchor = c.head; } }
+                else if (wParam == VK_RIGHT) { if (c.hasSelection() && !shift) { c.head = c.end(); c.anchor = c.head; } else { if (ctrl) c.head = g_editor.moveWordRight(c.head); else c.head = g_editor.moveCaretVisual(c.head, true); if (!shift) c.anchor = c.head; } }
+                else if (wParam == VK_UP) { int l = g_editor.getLineIdx(c.head); if (l > 0) c.head = g_editor.getPosFromLineAndX(l - 1, c.desiredX); if (!shift) c.anchor = c.head; }
+                else if (wParam == VK_DOWN) { int l = g_editor.getLineIdx(c.head); if (l + 1 < (int)g_editor.lineStarts.size()) c.head = g_editor.getPosFromLineAndX(l + 1, c.desiredX); if (!shift) c.anchor = c.head; }
+                else if (wParam == VK_HOME) { if (ctrl) c.head = 0; else { size_t p = c.head; while (p > 0 && g_editor.pt.charAt(p - 1) != '\n') p--; c.head = p; } if (!shift) c.anchor = c.head; }
+                else if (wParam == VK_END) { if (ctrl) c.head = g_editor.pt.length(); else { size_t p = c.head; size_t len = g_editor.pt.length(); while (p < len && g_editor.pt.charAt(p) != '\n') p++; c.head = p; } if (!shift) c.anchor = c.head; }
+                else if (wParam == VK_PRIOR) { RECT r; GetClientRect(hwnd, &r); int p = (int)((r.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); int l = g_editor.getLineIdx(c.head); c.head = g_editor.getPosFromLineAndX(std::max(0, l - p), c.desiredX); if (!shift) c.anchor = c.head; }
+                else if (wParam == VK_NEXT) { RECT r; GetClientRect(hwnd, &r); int p = (int)((r.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); int l = g_editor.getLineIdx(c.head); c.head = g_editor.getPosFromLineAndX(std::min((int)g_editor.lineStarts.size() - 1, l + p), c.desiredX); if (!shift) c.anchor = c.head; }
+                if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_HOME || wParam == VK_END) c.desiredX = g_editor.getXFromPos(c.head);
             }
-            g_editor.mergeCursors(); g_editor.ensureCaretVisible();
+            g_editor.mergeCursors(); g_editor.ensureCaretVisible(); InvalidateRect(hwnd, NULL, FALSE);
         }
-        else if (wParam == VK_RIGHT) {
-            bool isAlt = (GetKeyState(VK_MENU) & 0x8000) != 0; bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0; bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            if (isAlt && isShift) {
-                if (!g_editor.isRectSelecting) { g_editor.isRectSelecting = true; float x, y; g_editor.getCaretPoint(x, y); float contentX = (x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos); float contentY = (y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight)); g_editor.rectAnchorX = g_editor.rectHeadX = contentX; g_editor.rectAnchorY = g_editor.rectHeadY = contentY; }
-                g_editor.rectHeadX += g_editor.charWidth; g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
-            }
-            g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
-            for (auto& c : g_editor.cursors) {
-                if (c.hasSelection() && !isShift) { c.head = c.end(); c.anchor = c.head; }
-                else { if (isCtrl) c.head = g_editor.moveWordRight(c.head); else c.head = g_editor.moveCaretVisual(c.head, true); if (!isShift) c.anchor = c.head; }
-                c.desiredX = g_editor.getXFromPos(c.head);
-            }
-            g_editor.mergeCursors(); g_editor.ensureCaretVisible();
-        }
-        else if (wParam == VK_UP) {
-            bool isAlt = (GetKeyState(VK_MENU) & 0x8000) != 0; bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (isAlt && isShift) {
-                if (!g_editor.isRectSelecting) { g_editor.isRectSelecting = true; float x, y; g_editor.getCaretPoint(x, y); float contentX = (x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos); float contentY = (y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight)); g_editor.rectAnchorX = g_editor.rectHeadX = contentX; g_editor.rectAnchorY = g_editor.rectHeadY = contentY; }
-                g_editor.rectHeadY -= g_editor.lineHeight; g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
-            }
-            g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
-            for (auto& c : g_editor.cursors) { int line = g_editor.getLineIdx(c.head); if (line > 0) c.head = g_editor.getPosFromLineAndX(line - 1, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; }
-            g_editor.mergeCursors(); g_editor.ensureCaretVisible();
-        }
-        else if (wParam == VK_DOWN) {
-            bool isAlt = (GetKeyState(VK_MENU) & 0x8000) != 0; bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (isAlt && isShift) {
-                if (!g_editor.isRectSelecting) { g_editor.isRectSelecting = true; float x, y; g_editor.getCaretPoint(x, y); float contentX = (x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos); float contentY = (y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight)); g_editor.rectAnchorX = g_editor.rectHeadX = contentX; g_editor.rectAnchorY = g_editor.rectHeadY = contentY; }
-                g_editor.rectHeadY += g_editor.lineHeight; g_editor.updateRectSelection(); InvalidateRect(hwnd, NULL, FALSE); return 0;
-            }
-            g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
-            for (auto& c : g_editor.cursors) { int line = g_editor.getLineIdx(c.head); if (line + 1 < (int)g_editor.lineStarts.size()) c.head = g_editor.getPosFromLineAndX(line + 1, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; }
-            g_editor.mergeCursors(); g_editor.ensureCaretVisible();
-        }
-        else if (wParam == VK_HOME) {
-            g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
-            if (GetKeyState(VK_CONTROL) & 0x8000) { size_t target = 0; size_t anchor = target; if (!g_editor.cursors.empty() && (GetKeyState(VK_SHIFT) & 0x8000)) anchor = g_editor.cursors.back().anchor; g_editor.cursors.clear(); g_editor.cursors.push_back({ target, anchor, g_editor.getXFromPos(target) }); }
-            else { for (auto& c : g_editor.cursors) { size_t pos = c.head; while (pos > 0 && g_editor.pt.charAt(pos - 1) != '\n') pos--; c.head = pos; if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; c.desiredX = g_editor.getXFromPos(c.head); } g_editor.mergeCursors(); }
-            g_editor.ensureCaretVisible();
-        }
-        else if (wParam == VK_END) {
-            g_editor.rollbackPadding(); g_editor.isRectSelecting = false;
-            if (GetKeyState(VK_CONTROL) & 0x8000) { size_t target = g_editor.pt.length(); size_t anchor = target; if (!g_editor.cursors.empty() && (GetKeyState(VK_SHIFT) & 0x8000)) anchor = g_editor.cursors.back().anchor; g_editor.cursors.clear(); g_editor.cursors.push_back({ target, anchor, g_editor.getXFromPos(target) }); }
-            else { for (auto& c : g_editor.cursors) { size_t pos = c.head; size_t len = g_editor.pt.length(); while (pos < len && g_editor.pt.charAt(pos) != '\n') pos++; c.head = pos; if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; c.desiredX = g_editor.getXFromPos(c.head); } g_editor.mergeCursors(); }
-            g_editor.ensureCaretVisible();
-        }
-        else if (wParam == VK_DELETE) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; g_editor.deleteForwardAtCursors(); }
-        else if (wParam == VK_PRIOR) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; RECT rc; GetClientRect(hwnd, &rc); int pageLines = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); for (auto& c : g_editor.cursors) { int currentLine = g_editor.getLineIdx(c.head); int targetLine = std::max(0, currentLine - pageLines); c.head = g_editor.getPosFromLineAndX(targetLine, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; } g_editor.mergeCursors(); g_editor.ensureCaretVisible(); }
-        else if (wParam == VK_NEXT) { g_editor.rollbackPadding(); g_editor.isRectSelecting = false; RECT rc; GetClientRect(hwnd, &rc); int pageLines = (int)((rc.bottom / g_editor.dpiScaleY) / g_editor.lineHeight); for (auto& c : g_editor.cursors) { int currentLine = g_editor.getLineIdx(c.head); int targetLine = std::min((int)g_editor.lineStarts.size() - 1, currentLine + pageLines); c.head = g_editor.getPosFromLineAndX(targetLine, c.desiredX); if (!(GetKeyState(VK_SHIFT) & 0x8000)) c.anchor = c.head; } g_editor.mergeCursors(); g_editor.ensureCaretVisible(); }
         break;
-    case WM_CLOSE:
-        if (g_editor.checkUnsavedChanges()) { DestroyWindow(hwnd); }
-        return 0;
+    case WM_CLOSE: if (g_editor.checkUnsavedChanges()) DestroyWindow(hwnd); return 0;
     case WM_PAINT: g_editor.render(); break;
     case WM_DESTROY: g_editor.destroyGraphics(); PostQuitMessage(0); break;
     default: return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -1495,37 +1266,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
-    int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    const wchar_t* filePath = nullptr; if (argc >= 2) filePath = argv[1];
-    WNDCLASS wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    WNDCLASS wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"FastMiniEditorClass"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
     HWND hwnd = CreateWindowEx(0, wc.lpszClassName, L"FastMiniEditor - Minimal", WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInstance, NULL);
-    if (!hwnd) return 0;
-    ShowWindow(hwnd, nCmdShow);
-
-    if (filePath) {
-        g_editor.fileMap.reset(new MappedFile());
-        if (g_editor.fileMap->open(filePath)) {
-            g_editor.pt.initFromFile(g_editor.fileMap->ptr, g_editor.fileMap->size);
-            g_editor.currentFilePath = filePath;
-            g_editor.undo.clear(); g_editor.isDirty = false; g_editor.undo.markSaved();
-            g_editor.cursors.clear(); g_editor.cursors.push_back({ 0, 0, 0.0f });
-            g_editor.rebuildLineStarts(); g_editor.updateTitleBar();
-        }
-    }
+    if (!hwnd) return 0; ShowWindow(hwnd, nCmdShow);
     g_editor.updateTitleBar();
-
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_F3) {
-            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            g_editor.findNext(!shift);
-            continue;
-        }
-
-        if (!g_editor.hFindDlg || !IsDialogMessage(g_editor.hFindDlg, &msg)) {
-            TranslateMessage(&msg); DispatchMessage(&msg);
-        }
+    MSG msg; while (GetMessage(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_F3) { bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0; g_editor.findNext(!shift); continue; }
+        if (!g_editor.hFindDlg || !IsDialogMessage(g_editor.hFindDlg, &msg)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     }
-    LocalFree(argv); return 0;
+    return 0;
 }
