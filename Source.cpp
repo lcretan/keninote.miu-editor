@@ -1,12 +1,12 @@
-﻿// FastMiniEditor.cpp
+﻿// Source.cpp
 // Minimal, high-performance text editor for huge files using Win32 + DirectWrite.
 // Features: memory-mapped original file, piece table for edits, undo/redo, caret, basic input, fast visible-range rendering.
 // ... (Features list abbreviated for brevity) ...
 // Build Fix: Removed duplicate definition of openFileFromPath.
 
 // Build (MSVC):
-// rc FastMiniEditor.rc
-// cl /std:c++17 /O2 /EHsc FastMiniEditor.cpp FastMiniEditor.res /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib comctl32.lib
+// rc miu.rc
+// cl /std:c++17 /O2 /EHsc Source.cpp miu.res /link d2d1.lib dwrite.lib user32.lib ole32.lib imm32.lib comdlg32.lib comctl32.lib
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -293,7 +293,7 @@ struct Editor {
         if (textFormat) textFormat->Release(); if (dwFactory) dwFactory->Release(); if (rend) rend->Release(); if (d2dFactory) d2dFactory->Release();
     }
     void updateTitleBar() {
-        if (!hwnd) return; std::wstring title = L"FastMiniEditor - "; if (currentFilePath.empty()) title += L"Untitled"; else title += currentFilePath; if (isDirty) title += L" *"; SetWindowTextW(hwnd, title.c_str());
+        if (!hwnd) return; std::wstring title = L"miu - "; if (currentFilePath.empty()) title += L"無題"; else title += currentFilePath; if (isDirty) title += L" *"; SetWindowTextW(hwnd, title.c_str());
     }
     void updateDirtyFlag() { bool newDirty = undo.isModified(); if (isDirty != newDirty) { isDirty = newDirty; updateTitleBar(); } }
     void updateGutterWidth() {
