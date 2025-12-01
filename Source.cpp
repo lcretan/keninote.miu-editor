@@ -42,22 +42,21 @@ const std::wstring APP_VERSION = L"FastMiniEditor v1.1";
 const std::wstring HELP_TEXT =
 APP_VERSION + L"\n\n"
 L"[Shortcuts]\n"
-L"F1             Help\n"
-L"Ctrl+O         Open\n"
-L"Ctrl+S         Save\n"
-L"Ctrl+Shift+S   Save As\n"
-L"Ctrl+N         New\n"
-L"Ctrl+F         Find\n"
-L"Ctrl+H         Replace\n"
-L"F3             Find Next\n"
-L"Shift+F3       Find Prev\n"
-L"Ctrl+Z         Undo\n"
-L"Ctrl+Y         Redo\n"
-L"Ctrl+X/C/V     Cut/Copy/Paste\n"
-L"Ctrl+A         Select All\n"
-L"Alt+Drag       Rect Select\n"
-L"Ctrl+Wheel     Zoom\n"
-L"Drag&Drop      Open File";
+L"F1                 Help\n"
+L"Ctrl+N             New\n"
+L"Ctrl+O / Drag&Drop Open\n"
+L"Ctrl+S             Save\n"
+L"Ctrl+Shift+S       Save As\n"
+L"Ctrl+F             Find\n"
+L"Ctrl+H             Replace\n"
+L"F3                 Find Next\n"
+L"Shift+F3           Find Prev\n"
+L"Ctrl+Z             Undo\n"
+L"Ctrl+Y             Redo\n"
+L"Ctrl+X/C/V         Cut/Copy/Paste\n"
+L"Ctrl+A             Select All\n"
+L"Alt+Drag           Rect Select\n"
+L"Ctrl+Wheel         Zoom";
 
 // --- UTF helpers ---
 static std::wstring UTF8ToW(const std::string& s) {
@@ -253,6 +252,7 @@ struct Editor {
 
     ID2D1Factory* d2dFactory = nullptr; ID2D1HwndRenderTarget* rend = nullptr;
     IDWriteFactory* dwFactory = nullptr; IDWriteTextFormat* textFormat = nullptr; IDWriteTextFormat* popupTextFormat = nullptr;
+    IDWriteTextFormat* helpTextFormat = nullptr;
     ID2D1StrokeStyle* dotStyle = nullptr; ID2D1StrokeStyle* roundJoinStyle = nullptr;
     D2D1::ColorF background = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f); D2D1::ColorF textColor = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
     D2D1::ColorF gutterBg = D2D1::ColorF(0.95f, 0.95f, 0.95f, 1.0f); D2D1::ColorF gutterText = D2D1::ColorF(0.6f, 0.6f, 0.6f, 1.0f);
@@ -268,6 +268,11 @@ struct Editor {
         FLOAT dpix, dpiy; rend->GetDpi(&dpix, &dpiy); dpiScaleX = dpix / 96.0f; dpiScaleY = dpiy / 96.0f;
         dwFactory->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 24.0f, L"en-us", &popupTextFormat);
         if (popupTextFormat) { popupTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER); popupTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
+        dwFactory->CreateTextFormat(L"Consolas", NULL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 20.0f, L"en-us", &helpTextFormat);
+        if (helpTextFormat) {
+            helpTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            helpTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
         float dashes[] = { 2.0f, 2.0f }; D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_LINE_JOIN_MITER, 10.0f, D2D1_DASH_STYLE_CUSTOM, 0.0f); d2dFactory->CreateStrokeStyle(&props, dashes, 2, &dotStyle);
         D2D1_STROKE_STYLE_PROPERTIES roundProps = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f); d2dFactory->CreateStrokeStyle(&roundProps, nullptr, 0, &roundJoinStyle);
         updateFont(currentFontSize); rebuildLineStarts(); cursors.push_back({ 0, 0, 0.0f }); updateTitleBar();
@@ -284,7 +289,9 @@ struct Editor {
         updateGutterWidth(); updateScrollBars();
     }
     void destroyGraphics() {
-        if (popupTextFormat) popupTextFormat->Release(); if (dotStyle) dotStyle->Release(); if (roundJoinStyle) roundJoinStyle->Release();
+        if (popupTextFormat) popupTextFormat->Release();
+        if (helpTextFormat) helpTextFormat->Release(); 
+        if (dotStyle) dotStyle->Release(); if (roundJoinStyle) roundJoinStyle->Release();
         if (textFormat) textFormat->Release(); if (dwFactory) dwFactory->Release(); if (rend) rend->Release(); if (d2dFactory) d2dFactory->Release();
     }
     void updateTitleBar() {
@@ -963,8 +970,7 @@ struct Editor {
             // Use specific layout for help if needed, here reusing standard format but could make it left aligned
             // Creating a specific layout for help text
             IDWriteTextLayout* helpLayout = nullptr;
-            if (SUCCEEDED(dwFactory->CreateTextLayout(HELP_TEXT.c_str(), (UINT32)HELP_TEXT.size(), textFormat, helpW - 40, helpH - 40, &helpLayout))) {
-                // Temporarily force white color on the text format or use the brush
+            if (SUCCEEDED(dwFactory->CreateTextLayout(HELP_TEXT.c_str(), (UINT32)HELP_TEXT.size(), helpTextFormat, helpW - 40, helpH - 40, &helpLayout))) {
                 rend->DrawTextLayout(D2D1::Point2F(helpRect.left + 20, helpRect.top + 20), helpLayout, popupText);
                 helpLayout->Release();
             }
@@ -985,7 +991,72 @@ struct Editor {
     int ShowTaskDialog(const wchar_t* title, const wchar_t* instruction, const wchar_t* content, TASKDIALOG_COMMON_BUTTON_FLAGS buttons, PCWSTR icon) { TASKDIALOGCONFIG c = { 0 }; c.cbSize = sizeof(c); c.hwndParent = hwnd; c.hInstance = GetModuleHandle(NULL); c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW; c.pszWindowTitle = title; c.pszMainInstruction = instruction; c.pszContent = content; c.dwCommonButtons = buttons; c.pszMainIcon = icon; int n = 0; TaskDialogIndirect(&c, &n, NULL, NULL); return n; }
     bool checkUnsavedChanges() { if (!isDirty)return true; int r = ShowTaskDialog(L"確認", L"変更を保存しますか?", currentFilePath.empty() ? L"無題" : currentFilePath.c_str(), TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON, TD_WARNING_ICON); if (r == IDCANCEL)return false; if (r == IDYES) { if (currentFilePath.empty())return saveFileAs(); else return saveFile(currentFilePath); }return true; }
     bool openFile() { if (!checkUnsavedChanges())return false; WCHAR f[MAX_PATH] = { 0 }; OPENFILENAMEW o = { 0 }; o.lStructSize = sizeof(o); o.hwndOwner = hwnd; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrFilter = L"All\0*.*\0Text\0*.txt\0"; o.nFilterIndex = 1; o.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST; if (GetOpenFileNameW(&o)) { fileMap.reset(new MappedFile()); if (fileMap->open(f)) { pt.initFromFile(fileMap->ptr, fileMap->size); currentFilePath = f; undo.clear(); isDirty = false; undo.markSaved(); cursors.clear(); cursors.push_back({ 0,0,0.0f }); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); return true; } else ShowTaskDialog(L"エラー", L"開けません", f, TDCBF_OK_BUTTON, TD_ERROR_ICON); }return false; }
-    bool saveFile(const std::wstring& p) { std::wstring t = p + L".tmp"; HANDLE h = CreateFileW(t.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); if (h == INVALID_HANDLE_VALUE)return false; bool ok = true; for (const auto& piece : pt.pieces) { const char* ptr = piece.isOriginal ? (pt.origPtr + piece.start) : (pt.addBuf.data() + piece.start); DWORD w = 0; if (!WriteFile(h, ptr, (DWORD)piece.len, &w, NULL) || w != piece.len) { ok = false; break; } }CloseHandle(h); if (!ok) { DeleteFileW(t.c_str()); return false; }if (MoveFileExW(t.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) { DeleteFileW(t.c_str()); return false; }currentFilePath = p; undo.markSaved(); updateDirtyFlag(); return true; }
+    bool saveFile(const std::wstring& p) {
+        // 1. 一時ファイルへの書き出し
+        std::wstring t = p + L".tmp";
+        HANDLE h = CreateFileW(t.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            ShowTaskDialog(L"エラー", L"一時ファイルの作成に失敗しました。", t.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+        bool ok = true;
+        // メモリマップ(読み取り用)はまだ有効なので、そこからデータを読んで一時ファイルに書く
+        for (const auto& piece : pt.pieces) {
+            const char* ptr = piece.isOriginal ? (pt.origPtr + piece.start) : (pt.addBuf.data() + piece.start);
+            DWORD w = 0;
+            if (!WriteFile(h, ptr, (DWORD)piece.len, &w, NULL) || w != piece.len) {
+                ok = false; break;
+            }
+        }
+        CloseHandle(h);
+        if (!ok) {
+            DeleteFileW(t.c_str());
+            ShowTaskDialog(L"エラー", L"データの書き込みに失敗しました。", p.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+        // 2. 状態の保存（リロード後に復元するため）
+        // ファイル内容は変わらないため、オフセット位置はそのまま有効です
+        std::vector<Cursor> savedCursors = cursors;
+        int savedV = vScrollPos;
+        int savedH = hScrollPos;
+        std::wstring oldPath = currentFilePath;
+        // 3. ファイルロックの解除 (重要: MoveFileExWを成功させるため)
+        // 同じファイルへの保存(上書き)の場合、必ずUnmapが必要です
+        if (fileMap) {
+            fileMap->close();
+            // 注意: これ以降、pt.origPtr は無効なポインタになります。
+            // 再ロードまで pt のデータにアクセスしてはいけません。
+        }
+        // 4. ファイルの置換
+        if (MoveFileExW(t.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) == 0) {
+            // 失敗時：リカバリを試みる
+            DWORD err = GetLastError();
+            DeleteFileW(t.c_str());
+            // 古いファイルを再度開いてエディタの状態を復旧させる
+            if (!oldPath.empty()) {
+                if (fileMap) fileMap->open(oldPath.c_str());
+                if (fileMap->ptr) pt.origPtr = fileMap->ptr;
+            }
+            std::wstring msg = L"ファイルの保存に失敗しました。\nエラーコード: " + std::to_wstring(err);
+            ShowTaskDialog(L"エラー", msg.c_str(), p.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+        // 5. ファイルのリロード（新しい内容でマップし直す）
+        // openFileFromPath は Undo履歴などをリセットしますが、PieceTableを再構築するために必要です
+        if (!openFileFromPath(p)) {
+            ShowTaskDialog(L"致命的エラー", L"保存後のファイルを開けませんでした。", p.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON);
+            return false;
+        }
+        // 6. 状態の復元
+        // openFileFromPath でカーソルがリセットされるため、保存しておいた位置に戻す
+        cursors = savedCursors;
+        vScrollPos = savedV;
+        hScrollPos = savedH;
+        updateScrollBars();
+        ensureCaretVisible();
+        updateTitleBar(); // ダーティフラグのクリアなどを反映
+        return true;
+    }
     bool saveFileAs() { WCHAR f[MAX_PATH] = { 0 }; OPENFILENAMEW o = { 0 }; o.lStructSize = sizeof(o); o.hwndOwner = hwnd; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrFilter = L"All\0*.*\0Text\0*.txt\0"; o.nFilterIndex = 1; o.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT; if (GetSaveFileNameW(&o))return saveFile(f); return false; }
     void newFile() { if (!checkUnsavedChanges())return; pt.initEmpty(); currentFilePath.clear(); undo.clear(); isDirty = false; cursors.clear(); cursors.push_back({ 0,0,0.0f }); vScrollPos = 0; hScrollPos = 0; fileMap.reset(); rebuildLineStarts(); updateTitleBar(); InvalidateRect(hwnd, NULL, FALSE); }
     bool openFileFromPath(const std::wstring& path) {
@@ -1046,11 +1117,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     } break;
     case WM_MOUSEMOVE: {
         int x = (short)LOWORD(lParam), y = (short)HIWORD(lParam);
-        if (g_editor.isDragMovePending) { if (abs(x - g_editor.lastClickX) > 5 || abs(y - g_editor.lastClickY) > 5) { g_editor.isDragMovePending = false; g_editor.isDragMoving = true; SetCursor(LoadCursor(NULL, IDC_ARROW)); } }
-        if (g_editor.isDragMoving) { g_editor.dragMoveDestPos = g_editor.getDocPosFromPoint(x, y); InvalidateRect(hwnd, NULL, FALSE); return 0; }
-        if (g_editor.isDragging) {
-            if (g_editor.isRectSelecting) { float vx = x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos; float vy = y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight); g_editor.rectHeadX = vx; g_editor.rectHeadY = vy; g_editor.updateRectSelection(); }
-            else { size_t p = g_editor.getDocPosFromPoint(x, y); if (!g_editor.cursors.empty()) { g_editor.cursors.back().head = p; g_editor.cursors.back().desiredX = g_editor.getXFromPos(p); } }
+
+        // 1. ドラッグ開始の閾値判定
+        if (g_editor.isDragMovePending) {
+            if (abs(x - g_editor.lastClickX) > 5 || abs(y - g_editor.lastClickY) > 5) {
+                g_editor.isDragMovePending = false;
+                g_editor.isDragMoving = true;
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+            }
+        }
+
+        // 2. ドラッグ移動中の処理（キャレット表示など）
+        if (g_editor.isDragMoving) {
+            g_editor.dragMoveDestPos = g_editor.getDocPosFromPoint(x, y);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        // 3. 通常のドラッグ選択処理
+        // 修正: !g_editor.isDragMovePending を追加し、
+        // 「移動判定待ち」の間は選択範囲を書き換えないようにする
+        if (g_editor.isDragging && !g_editor.isDragMovePending) {
+            if (g_editor.isRectSelecting) {
+                float vx = x / g_editor.dpiScaleX - g_editor.gutterWidth + g_editor.hScrollPos;
+                float vy = y / g_editor.dpiScaleY + (g_editor.vScrollPos * g_editor.lineHeight);
+                g_editor.rectHeadX = vx;
+                g_editor.rectHeadY = vy;
+                g_editor.updateRectSelection();
+            }
+            else {
+                size_t p = g_editor.getDocPosFromPoint(x, y);
+                if (!g_editor.cursors.empty()) {
+                    g_editor.cursors.back().head = p;
+                    g_editor.cursors.back().desiredX = g_editor.getXFromPos(p);
+                }
+            }
             InvalidateRect(hwnd, NULL, FALSE);
         }
     } break;
