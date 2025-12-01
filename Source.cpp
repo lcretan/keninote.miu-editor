@@ -1,8 +1,6 @@
 ﻿// Source.cpp
 // Minimal, high-performance text editor for huge files using Win32 + DirectWrite.
 // Features: memory-mapped original file, piece table for edits, undo/redo, caret, basic input, fast visible-range rendering.
-// ... (Features list abbreviated for brevity) ...
-// Build Fix: Removed duplicate definition of openFileFromPath.
 
 // Build (MSVC):
 // rc miu.rc
@@ -37,25 +35,26 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "comctl32.lib")
 
-const std::wstring APP_VERSION = L"miu v1.0.1";
+const std::wstring APP_VERSION = L"miu v1.0.2";
 const std::wstring HELP_TEXT =
 APP_VERSION + L"\n\n"
 L"[Shortcuts]\n"
-L"F1                 Help\n"
-L"Ctrl+N             New\n"
+L"F1                  Help\n"
+L"Ctrl+N              New\n"
 L"Ctrl+O / Drag&Drop Open\n"
-L"Ctrl+S             Save\n"
-L"Ctrl+Shift+S       Save As\n"
-L"Ctrl+F             Find\n"
-L"Ctrl+H             Replace\n"
-L"F3                 Find Next\n"
-L"Shift+F3           Find Prev\n"
-L"Ctrl+Z             Undo\n"
-L"Ctrl+Y             Redo\n"
-L"Ctrl+X/C/V         Cut/Copy/Paste\n"
-L"Ctrl+A             Select All\n"
-L"Alt+Drag           Rect Select\n"
-L"Ctrl+Wheel         Zoom";
+L"Ctrl+S              Save\n"
+L"Ctrl+Shift+S        Save As\n"
+L"Ctrl+F              Find\n"
+L"Ctrl+H              Replace\n"
+L"F3                  Find Next\n"
+L"Shift+F3            Find Prev\n"
+L"Ctrl+Z              Undo\n"
+L"Ctrl+Y              Redo\n"
+L"Ctrl+X/C/V          Cut/Copy/Paste\n"
+L"Ctrl+A              Select All\n"
+L"Alt+Drag            Rect Select\n"
+L"Ctrl+Wheel/+/-      Zoom\n"
+L"Ctrl+0              Reset Zoom";
 
 static std::wstring UTF8ToW(const std::string& s) {
     if (s.empty()) return {};
@@ -282,7 +281,7 @@ struct Editor {
     }
     void destroyGraphics() {
         if (popupTextFormat) popupTextFormat->Release();
-        if (helpTextFormat) helpTextFormat->Release(); 
+        if (helpTextFormat) helpTextFormat->Release();
         if (dotStyle) dotStyle->Release(); if (roundJoinStyle) roundJoinStyle->Release();
         if (textFormat) textFormat->Release(); if (dwFactory) dwFactory->Release(); if (rend) rend->Release(); if (d2dFactory) d2dFactory->Release();
     }
@@ -1370,6 +1369,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             case 'X': g_editor.cutToClipboard(); return 0;
             case 'V': g_editor.pasteFromClipboard(); return 0;
             case 'A': { g_editor.rollbackPadding(); g_editor.cursors.clear(); g_editor.cursors.push_back({ g_editor.pt.length(), 0, 0.0f }); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+                    // Zoom support
+            case VK_ADD: case VK_OEM_PLUS: {
+                g_editor.updateFont(g_editor.currentFontSize * 1.1f);
+                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
+                SetTimer(hwnd, 1, 1000, NULL);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            case VK_SUBTRACT: case VK_OEM_MINUS: {
+                g_editor.updateFont(g_editor.currentFontSize * 0.9f);
+                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
+                SetTimer(hwnd, 1, 1000, NULL);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            case '0': case VK_NUMPAD0: {
+                g_editor.updateFont(21.0f); // Default
+                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
+                SetTimer(hwnd, 1, 1000, NULL);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             default: break; // Fall through for Ctrl+Nav keys
             }
         }
