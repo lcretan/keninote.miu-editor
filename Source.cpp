@@ -1274,7 +1274,7 @@ struct Editor {
         size_t blockEnd = (lines.back() + 1 < (int)lineStarts.size()) ? lineStarts[lines.back() + 1] : pt.length();
         blockText = pt.getRange(blockStart, blockEnd - blockStart);
         bool needNewline = false;
-        if (!blockText.empty() && blockText.back() != '\n') {
+        if (blockText.empty() || blockText.back() != '\n') {
             blockText += '\n';
             needNewline = true;
         }
@@ -1284,7 +1284,7 @@ struct Editor {
         }
         else {
             insertPos = blockEnd;
-            if (needNewline && blockEnd == pt.length() && pt.charAt(blockEnd - 1) != '\n') {
+            if (needNewline && blockEnd == pt.length() && blockEnd > 0 && pt.charAt(blockEnd - 1) != '\n') {
                 pt.insert(blockEnd, "\n");
                 batch.ops.push_back({ EditOp::Insert, blockEnd, "\n" });
                 insertPos++;
