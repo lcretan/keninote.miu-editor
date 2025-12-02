@@ -763,13 +763,17 @@ struct Editor {
         if (pendingPadding.ops.empty()) {
             pendingPadding.beforeCursors = cursors;
         }
-        rollbackPadding();
+        rollbackPadding(); // 前回のドラッグ移動分のパディングを一旦取り消し
+
         float startY = std::min(rectAnchorY, rectHeadY);
         float endY = std::max(rectAnchorY, rectHeadY);
         int startLineIdx = (int)(startY / lineHeight);
         int endLineIdx = (int)(endY / lineHeight);
+
         if (startLineIdx < 0) startLineIdx = 0;
         int currentMaxLine = (int)lineStarts.size() - 1;
+
+        // 必要に応じて行を増やす（ファイル末尾より下へドラッグした場合）
         if (endLineIdx > currentMaxLine) {
             int linesToAdd = endLineIdx - currentMaxLine;
             size_t insertPos = pt.length();
@@ -779,53 +783,54 @@ struct Editor {
             rebuildLineStarts();
         }
         if (endLineIdx >= (int)lineStarts.size()) endLineIdx = (int)lineStarts.size() - 1;
+
         float targetAnchorX = rectAnchorX;
         float targetHeadX = rectHeadX;
-        std::vector<int> lines; for (int i = startLineIdx; i <= endLineIdx; ++i) lines.push_back(i); std::reverse(lines.begin(), lines.end());
+
+        // 行の処理順序を決定（カーソル生成順序のため）
+        std::vector<int> lines;
+        for (int i = startLineIdx; i <= endLineIdx; ++i) lines.push_back(i);
+        std::reverse(lines.begin(), lines.end()); // 一般的に下の行から処理することが多いが、ここでは順序は描画等に影響しない
+
         cursors.clear();
+
+        // 1. まずパディング（スペース埋め）が必要かチェックして挿入する
+        //    マウス座標が既存の行の長さを超えている場合、そこまでスペースを埋める
+        float requiredX = std::max(targetAnchorX, targetHeadX);
+
         for (int lineIdx : lines) {
-            size_t start = lineStarts[lineIdx]; size_t nextStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
-            size_t end = nextStart; if (end > start && pt.charAt(end - 1) == '\n') end--;
-            float currentWidth = 0; std::string lineStr = pt.getRange(start, end - start); std::wstring wLine = UTF8ToW(lineStr); currentWidth = (float)wLine.length() * charWidth;
-            float neededX = std::max(targetAnchorX, targetHeadX);
-            if (neededX > currentWidth) {
-                int spacesNeeded = (int)((neededX - currentWidth) / charWidth + 0.5f);
-                if (spacesNeeded > 0) { std::string spaces(spacesNeeded, ' '); pt.insert(end, spaces); pendingPadding.ops.push_back({ EditOp::Insert, end, spaces }); }
+            size_t start = lineStarts[lineIdx];
+            size_t nextStart = (lineIdx + 1 < (int)lineStarts.size()) ? lineStarts[lineIdx + 1] : pt.length();
+            size_t end = nextStart;
+            if (end > start && pt.charAt(end - 1) == '\n') end--;
+
+            std::string lineStr = pt.getRange(start, end - start);
+            std::wstring wLine = UTF8ToW(lineStr);
+            float currentWidth = (float)wLine.length() * charWidth;
+
+            if (requiredX > currentWidth) {
+                // 不足している幅をスペースで埋める
+                int spacesNeeded = (int)((requiredX - currentWidth) / charWidth + 0.5f);
+                if (spacesNeeded > 0) {
+                    std::string spaces(spacesNeeded, ' ');
+                    pt.insert(end, spaces);
+                    pendingPadding.ops.push_back({ EditOp::Insert, end, spaces });
+                }
             }
         }
+
         if (!pendingPadding.ops.empty()) rebuildLineStarts();
-        bool isRightSide = (targetHeadX >= targetAnchorX);
-        float synchronizedHeadX = isRightSide ? -1.0f : 100000.0f;
-        bool firstSync = true;
+
+        // 2. カーソル位置の決定
+        //    以前のコードにあった「rectHeadX = synchronizedHeadX」のような座標の上書き処理を削除し、
+        //    マウス座標(targetHeadX)に基づいて素直にヒットテストを行う。
         for (int i = startLineIdx; i <= endLineIdx; ++i) {
             size_t anc = getPosFromLineAndX(i, targetAnchorX);
             size_t hd = getPosFromLineAndX(i, targetHeadX);
-            float hdX = getXFromPos(hd);
-            if (targetHeadX > hdX + 0.1f) {
-                hd = moveCaretVisual(hd, true);
-                hdX = getXFromPos(hd);
-            }
-            else if (targetHeadX < hdX - 0.1f) {
-                hd = moveCaretVisual(hd, false);
-                hdX = getXFromPos(hd);
-            }
-            if (firstSync) {
-                synchronizedHeadX = hdX;
-                firstSync = false;
-            }
-            else {
-                if (isRightSide) {
-                    if (hdX > synchronizedHeadX) synchronizedHeadX = hdX;
-                }
-                else {
-                    if (hdX < synchronizedHeadX) synchronizedHeadX = hdX;
-                }
-            }
+
+            // カーソルを追加。desiredXには現在のマウス位置(targetHeadX)を保持させることで
+            // 上下移動時などにX座標が維持されるようにする。
             cursors.push_back({ hd, anc, targetHeadX });
-        }
-        rectHeadX = synchronizedHeadX;
-        for (auto& c : cursors) {
-            c.desiredX = rectHeadX;
         }
     }
     void performDragMove() {
