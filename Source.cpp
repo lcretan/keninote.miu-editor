@@ -526,7 +526,8 @@ struct Editor {
                 else {
                     auto words_begin = std::sregex_iterator(fullText.begin(), fullText.end(), re);
                     auto words_end = std::sregex_iterator();
-                    size_t bestPos = std::string::npos; size_t lastMatch = std::string::npos;
+                    size_t bestPos = std::string::npos;
+                    size_t lastMatch = std::string::npos;
                     size_t limit = (startPos == 0) ? len : startPos;
                     for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
                         size_t pos = i->position();
@@ -543,14 +544,20 @@ struct Editor {
         size_t qLen = query.length();
         auto toLower = [](char c) { return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c; };
         size_t cur = startPos;
-        if (forward) { if (cur >= len) cur = 0; }
-        else { if (cur == 0) cur = len; else cur--; }
+        if (forward) {
+            if (cur >= len) cur = 0;
+        }
+        else {
+            if (cur == 0) cur = len; else cur--;
+        }
         size_t count = 0;
         while (count < len) {
             bool match = true;
             for (size_t i = 0; i < qLen; ++i) {
-                size_t p = cur + i; if (p >= len) { match = false; break; }
-                char c1 = pt.charAt(p); char c2 = query[i];
+                size_t p = cur + i;
+                if (p >= len) { match = false; break; }
+                char c1 = pt.charAt(p);
+                char c2 = query[i];
                 if (!matchCase) { c1 = toLower(c1); c2 = toLower(c2); }
                 if (c1 != c2) { match = false; break; }
             }
@@ -558,9 +565,36 @@ struct Editor {
                 if (cur > 0 && isWordChar(pt.charAt(cur - 1))) match = false;
                 if (match && (cur + qLen < len) && isWordChar(pt.charAt(cur + qLen))) match = false;
             }
+            if (match) {
+                size_t nextPos = cur + qLen;
+                if (nextPos < len) {
+                    unsigned char b1 = (unsigned char)pt.charAt(nextPos);
+                    if (b1 == 0xE2 && nextPos + 2 < len) {
+                        unsigned char b2 = (unsigned char)pt.charAt(nextPos + 1);
+                        unsigned char b3 = (unsigned char)pt.charAt(nextPos + 2);
+                        if (b2 == 0x80 && b3 == 0x8D) match = false;
+                    }
+                    else if (b1 == 0xEF && nextPos + 2 < len) {
+                        unsigned char b2 = (unsigned char)pt.charAt(nextPos + 1);
+                        unsigned char b3 = (unsigned char)pt.charAt(nextPos + 2);
+                        if (b2 == 0xB8 && b3 == 0x8F) match = false;
+                    }
+                    else if (b1 == 0xF0 && nextPos + 3 < len) {
+                        unsigned char b2 = (unsigned char)pt.charAt(nextPos + 1);
+                        unsigned char b3 = (unsigned char)pt.charAt(nextPos + 2);
+                        unsigned char b4 = (unsigned char)pt.charAt(nextPos + 3);
+                        if (b2 == 0x9F && b3 == 0x8F && (b4 >= 0xBB && b4 <= 0xBF)) match = false;
+                    }
+                }
+            }
             if (match) return cur;
-            if (forward) { cur++; if (cur >= len) cur = 0; }
-            else { if (cur == 0) cur = len - 1; else cur--; }
+            if (forward) {
+                cur++;
+                if (cur >= len) cur = 0;
+            }
+            else {
+                if (cur == 0) cur = len - 1; else cur--;
+            }
             count++;
         }
         return std::string::npos;
