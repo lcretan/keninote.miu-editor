@@ -809,7 +809,30 @@ struct Editor {
         hFindDlg = CreateDialogParamW(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_FIND_DIALOG), hwnd, FindDlgProc, (LPARAM)this);
         ShowWindow(hFindDlg, SW_SHOW);
     }
-    void rollbackPadding() { if (pendingPadding.ops.empty()) return; for (int i = (int)pendingPadding.ops.size() - 1; i >= 0; --i) { const auto& op = pendingPadding.ops[i]; if (op.type == EditOp::Insert) pt.erase(op.pos, op.text.size()); } pendingPadding.ops.clear(); rebuildLineStarts(); }
+    void rollbackPadding() {
+        if (pendingPadding.ops.empty()) return;
+        for (int i = (int)pendingPadding.ops.size() - 1; i >= 0; --i) {
+            const auto& op = pendingPadding.ops[i];
+            if (op.type == EditOp::Insert) {
+                pt.erase(op.pos, op.text.size());
+                size_t len = op.text.size();
+                for (auto& c : cursors) {
+                    if (c.head > op.pos) {
+                        if (c.head < op.pos + len) c.head = op.pos;
+                        else c.head -= len;
+                    }
+                    if (c.anchor > op.pos) {
+                        if (c.anchor < op.pos + len) c.anchor = op.pos;
+                        else c.anchor -= len;
+                    }
+                }
+            }
+        }
+        pendingPadding.ops.clear();
+        pendingPadding.beforeCursors.clear();
+        pendingPadding.afterCursors.clear();
+        rebuildLineStarts();
+    }
     void commitPadding() {
         if (pendingPadding.ops.empty()) return;
         undo.push(pendingPadding);
@@ -1061,7 +1084,45 @@ struct Editor {
     }
     void insertAtCursors(const std::string& text) { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; if (c.hasSelection()) { size_t s = c.start(); size_t l = c.end() - s; std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; }c.head = s; c.anchor = s; } } for (int idx : indices) { Cursor& c = cursors[idx]; size_t p = c.head; pt.insert(p, text); batch.ops.push_back({ EditOp::Insert,p,text }); size_t l = text.size(); for (auto& o : cursors) { if (o.head >= p)o.head += l; if (o.anchor >= p)o.anchor += l; } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
     void deleteForwardAtCursors() { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; size_t s = c.start(); size_t l = 0; if (c.hasSelection())l = c.end() - s; else { size_t n = moveCaretVisual(s, true); if (n > s)l = n - s; }if (l > 0 && s + l <= pt.length()) { std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; }c.head = s; c.anchor = s; } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
-    void backspaceAtCursors() { commitPadding(); if (cursors.empty()) return; EditBatch batch; batch.beforeCursors = cursors; std::vector<int> indices(cursors.size()); for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i; std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); }); for (int idx : indices) { Cursor& c = cursors[idx]; size_t s = c.start(); size_t l = 0; if (c.hasSelection())l = c.end() - s; else if (s > 0) { size_t p = moveCaretVisual(s, false); if (p < s) { l = s - p; s = p; } }if (l > 0) { std::string d = pt.getRange(s, l); pt.erase(s, l); batch.ops.push_back({ EditOp::Erase,s,d }); for (auto& o : cursors) { if (o.head > s)o.head -= l; if (o.anchor > s)o.anchor -= l; } } } batch.afterCursors = cursors; undo.push(batch); rebuildLineStarts(); ensureCaretVisible(); updateDirtyFlag(); }
+    void backspaceAtCursors(bool allowCharDeletion = true) {
+        commitPadding();
+        if (cursors.empty()) return;
+        EditBatch batch;
+        batch.beforeCursors = cursors;
+        std::vector<int> indices(cursors.size());
+        for (size_t i = 0; i < cursors.size(); ++i) indices[i] = (int)i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) {return cursors[a].start() > cursors[b].start(); });
+        for (int idx : indices) {
+            Cursor& c = cursors[idx];
+            size_t s = c.start();
+            size_t l = 0;
+            if (c.hasSelection()) {
+                l = c.end() - s;
+            }
+            else if (allowCharDeletion && s > 0) {
+                size_t p = moveCaretVisual(s, false);
+                if (p < s) { l = s - p; s = p; }
+            }
+            if (l > 0) {
+                std::string d = pt.getRange(s, l);
+                pt.erase(s, l);
+                batch.ops.push_back({ EditOp::Erase,s,d });
+                for (auto& o : cursors) {
+                    if (o.head > s)o.head -= l;
+                    if (o.anchor > s)o.anchor -= l;
+                }
+                c.head = s;
+                c.anchor = s;
+            }
+        }
+        if (!batch.ops.empty()) {
+            batch.afterCursors = cursors;
+            undo.push(batch);
+            rebuildLineStarts();
+            ensureCaretVisible();
+            updateDirtyFlag();
+        }
+    }
     void copyToClipboard() {
         std::string t;
         std::vector<Cursor> s = cursors;
@@ -1597,12 +1658,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_editor.showHelpPopup) { g_editor.showHelpPopup = false; InvalidateRect(hwnd, NULL, FALSE); }
         wchar_t c = (wchar_t)wParam;
         if (c < 32 && c != 8 && c != 13 && c != 9) break;
-        if (c == 8) { g_editor.highSurrogate = 0; g_editor.backspaceAtCursors(); }
-        else if (c == 13) { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
-        else if (c == 9) {
+        if (c == 8) {
             g_editor.highSurrogate = 0;
-            g_editor.insertAtCursors("\t");
+            bool hadSelection = false;
+            for (const auto& cur : g_editor.cursors) {
+                if (cur.hasSelection()) { hadSelection = true; break; }
+            }
+            g_editor.rollbackPadding();
+            g_editor.backspaceAtCursors(!hadSelection);
+            if (hadSelection) {
+                for (auto& cur : g_editor.cursors) {
+                    cur.anchor = cur.head;
+                }
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
         }
+        else if (c == 13) { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
+        else if (c == 9) { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\t"); }
         else {
             if (c >= 0xD800 && c <= 0xDBFF) { g_editor.highSurrogate = c; return 0; }
             std::wstring s; if (c >= 0xDC00 && c <= 0xDFFF) { if (g_editor.highSurrogate) { s += g_editor.highSurrogate; s += c; g_editor.highSurrogate = 0; } else return 0; }
