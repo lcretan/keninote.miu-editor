@@ -35,7 +35,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "comctl32.lib")
 
-const std::wstring APP_VERSION = L"miu v1.0.6";
+const std::wstring APP_VERSION = L"miu v1.0.7";
 const std::wstring HELP_TEXT =
 APP_VERSION + L"\n\n"
 L"[Shortcuts]\n"
@@ -59,7 +59,8 @@ L"Ctrl+D              Select Word / Next\n"
 L"Ctrl+A              Select All\n"
 L"Alt+Drag            Rect Select\n"
 L"Ctrl+Wheel/+/-      Zoom\n"
-L"Ctrl+0              Reset Zoom";
+L"Ctrl+0              Reset Zoom\n"
+L"F11                 Full Screen\n";
 
 static std::wstring UTF8ToW(const std::string& s) {
     if (s.empty()) return {};
@@ -253,7 +254,8 @@ struct Editor {
     D2D1::ColorF gutterBg = D2D1::ColorF(0.95f, 0.95f, 0.95f, 1.0f); D2D1::ColorF gutterText = D2D1::ColorF(0.6f, 0.6f, 0.6f, 1.0f);
     D2D1::ColorF selColor = D2D1::ColorF(0.7f, 0.8f, 1.0f, 1.0f); D2D1::ColorF highlightColor = D2D1::ColorF(1.0f, 1.0f, 0.0f, 0.4f);
     float dpiScaleX = 1.0f, dpiScaleY = 1.0f; float lineHeight = 17.5f; float charWidth = 8.0f;
-
+    bool isFullScreen = false;
+    WINDOWPLACEMENT prevPlacement = { sizeof(WINDOWPLACEMENT) };
     void initGraphics(HWND h) {
         hwnd = h;
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2dFactory);
@@ -1077,8 +1079,8 @@ struct Editor {
             ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
             rend->FillRoundedRectangle(D2D1::RoundedRect(helpRect, 10.0f, 10.0f), popupBg);
             IDWriteTextLayout* helpLayout = nullptr;
-            if (SUCCEEDED(dwFactory->CreateTextLayout(HELP_TEXT.c_str(), (UINT32)HELP_TEXT.size(), helpTextFormat, helpW - 40, helpH - 40, &helpLayout))) {
-                rend->DrawTextLayout(D2D1::Point2F(helpRect.left + 20, helpRect.top + 20), helpLayout, popupText);
+            if (SUCCEEDED(dwFactory->CreateTextLayout(HELP_TEXT.c_str(), (UINT32)HELP_TEXT.size(), helpTextFormat, helpW - 40, helpH - 20, &helpLayout))) {
+                rend->DrawTextLayout(D2D1::Point2F(helpRect.left + 20, helpRect.top + 10), helpLayout, popupText);
                 helpLayout->Release();
             }
             popupBg->Release(); popupText->Release();
@@ -1690,6 +1692,31 @@ struct Editor {
         updateDirtyFlag();
         InvalidateRect(hwnd, NULL, FALSE);
     }
+    void toggleFullScreen() {
+        if (!hwnd) return;
+        DWORD style = GetWindowLong(hwnd, GWL_STYLE);
+        if (!isFullScreen) {
+            if (GetWindowPlacement(hwnd, &prevPlacement)) {
+                MONITORINFO mi = { sizeof(mi) };
+                if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                    SetWindowLong(hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+                    SetWindowPos(hwnd, HWND_TOP,
+                        mi.rcMonitor.left, mi.rcMonitor.top,
+                        mi.rcMonitor.right - mi.rcMonitor.left,
+                        mi.rcMonitor.bottom - mi.rcMonitor.top,
+                        SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                    isFullScreen = true;
+                }
+            }
+        }
+        else {
+            SetWindowLong(hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+            SetWindowPlacement(hwnd, &prevPlacement);
+            SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            isFullScreen = false;
+        }
+    }
 } g_editor;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2000,6 +2027,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
             if (msg.wParam == VK_F1) {
                 g_editor.showHelpPopup = true;
                 InvalidateRect(hwnd, NULL, FALSE);
+                continue;
+            }
+            if (msg.wParam == VK_F11) {
+                g_editor.toggleFullScreen();
                 continue;
             }
             if (msg.wParam == VK_F3) {
