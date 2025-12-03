@@ -1595,10 +1595,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER: if (wParam == 1) { KillTimer(hwnd, 1); InvalidateRect(hwnd, NULL, FALSE); } break;
     case WM_CHAR: {
         if (g_editor.showHelpPopup) { g_editor.showHelpPopup = false; InvalidateRect(hwnd, NULL, FALSE); }
-
-        wchar_t c = (wchar_t)wParam; if (c < 32 && c != 8 && c != 13) break;
+        wchar_t c = (wchar_t)wParam;
+        if (c < 32 && c != 8 && c != 13 && c != 9) break;
         if (c == 8) { g_editor.highSurrogate = 0; g_editor.backspaceAtCursors(); }
         else if (c == 13) { g_editor.highSurrogate = 0; g_editor.insertAtCursors("\n"); }
+        else if (c == 9) {
+            g_editor.highSurrogate = 0;
+            g_editor.insertAtCursors("\t");
+        }
         else {
             if (c >= 0xD800 && c <= 0xDBFF) { g_editor.highSurrogate = c; return 0; }
             std::wstring s; if (c >= 0xDC00 && c <= 0xDFFF) { if (g_editor.highSurrogate) { s += g_editor.highSurrogate; s += c; g_editor.highSurrogate = 0; } else return 0; }
