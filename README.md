@@ -4,6 +4,8 @@
 
 ✨AIを活用した超高速テキストエディタです。Win32 API と C++ による軽快な動作と、大容量ファイル編集に対応した設計が特徴です。
 
+<img src="image/screenshot.png" alt="[miu スクリーンショット]" />
+
 [ライセンス](https://github.com/kenjinote/miu/blob/master/LICENSE.TXT)
 
 ## 主な特徴 🚩
