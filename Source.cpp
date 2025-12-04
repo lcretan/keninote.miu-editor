@@ -1703,7 +1703,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
-        if (wParam != VK_LEFT && wParam != VK_RIGHT && wParam != VK_F4) return DefWindowProc(hwnd, msg, wParam, lParam);
+        if (wParam != VK_LEFT && wParam != VK_RIGHT) return DefWindowProc(hwnd, msg, wParam, lParam);
         break;
     case WM_KEYDOWN:
         if (GetKeyState(VK_CONTROL) & 0x8000) {
