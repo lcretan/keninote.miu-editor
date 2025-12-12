@@ -46,31 +46,6 @@ static std::wstring GetResString(UINT id) {
 }
 
 const std::wstring APP_VERSION = L"miu v1.0.9"; // Version bumped
-const std::wstring HELP_TEXT =
-APP_VERSION + L"\n\n"
-L"[Shortcuts]\n"
-L"F1                  Help\n"
-L"Ctrl+N              New\n"
-L"Ctrl+O / Drag&Drop  Open\n"
-L"Ctrl+S              Save\n"
-L"Ctrl+Shift+S        Save As\n"
-L"Ctrl+F              Find\n"
-L"Ctrl+H              Replace\n"
-L"F3                  Find Next\n"
-L"Shift+F3            Find Prev\n"
-L"Ctrl+Z              Undo\n"
-L"Ctrl+Y              Redo\n"
-L"Ctrl+X/C/V          Cut/Copy/Paste\n"
-L"Ctrl+U              Upper Case\n"
-L"Ctrl+Shift+U        Lower Case\n"
-L"Alt+Up/Down         Move Line\n"
-L"Alt+Shift+Up/Down   Copy Line\n"
-L"Ctrl+D              Select Word / Next\n"
-L"Ctrl+A              Select All\n"
-L"Alt+Drag            Rect Select\n"
-L"Ctrl+Wheel/+/-      Zoom\n"
-L"Ctrl+0              Reset Zoom\n"
-L"F11                 Full Screen\n";
 
 static std::wstring UTF8ToW(const std::string& s) {
     if (s.empty()) return {};
