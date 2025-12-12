@@ -27,6 +27,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <iomanip>
 #include <sstream>
 #include <regex> 
+#include <cstring> // Added for memchr
 #include "resource.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -37,7 +38,6 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 static std::wstring GetResString(UINT id) {
     const wchar_t* pBuf = nullptr;
-    // LoadStringWでポインタを取得する方法 (高速)
     int len = LoadStringW(GetModuleHandle(NULL), id, (LPWSTR)&pBuf, 0);
     if (len > 0 && pBuf) {
         return std::wstring(pBuf, len);
@@ -45,7 +45,7 @@ static std::wstring GetResString(UINT id) {
     return L"";
 }
 
-const std::wstring APP_VERSION = L"miu v1.0.8";
+const std::wstring APP_VERSION = L"miu v1.0.9"; // Version bumped
 const std::wstring HELP_TEXT =
 APP_VERSION + L"\n\n"
 L"[Shortcuts]\n"
@@ -335,14 +335,32 @@ struct Editor {
         float digitWidth = 10.0f * (currentFontSize / 14.0f); gutterWidth = (float)(digits * digitWidth + 20.0f);
     }
     void rebuildLineStarts() {
-        lineStarts.clear(); lineStarts.push_back(0); size_t len = pt.length(); size_t globalOffset = 0; size_t maxBytes = 0;
+        lineStarts.clear();
+        size_t totalLen = pt.length();
+        if (totalLen > 0) lineStarts.reserve(totalLen / 40 + 1);
+        lineStarts.push_back(0);
+        size_t globalOffset = 0;
+        size_t maxBytes = 0;
         for (const auto& p : pt.pieces) {
             const char* buf = p.isOriginal ? (pt.origPtr + p.start) : (pt.addBuf.data() + p.start);
-            for (size_t i = 0; i < p.len; ++i) { if (buf[i] == '\n') lineStarts.push_back(globalOffset + i + 1); }
+            const char* ptr = buf;
+            const char* end = buf + p.len;
+            while (ptr < end) {
+                const void* found = memchr(ptr, '\n', end - ptr);
+                if (found) {
+                    const char* newlinePtr = (const char*)found;
+                    size_t offsetInPiece = newlinePtr - buf;
+                    lineStarts.push_back(globalOffset + offsetInPiece + 1);
+                    ptr = newlinePtr + 1;
+                }
+                else {
+                    break;
+                }
+            }
             globalOffset += p.len;
         }
         for (size_t i = 0; i < lineStarts.size(); ++i) {
-            size_t s = lineStarts[i]; size_t e = (i + 1 < lineStarts.size()) ? lineStarts[i + 1] : len;
+            size_t s = lineStarts[i]; size_t e = (i + 1 < lineStarts.size()) ? lineStarts[i + 1] : totalLen;
             size_t lineLen = e - s; if (lineLen > maxBytes) maxBytes = lineLen;
         }
         maxLineWidth = maxBytes * charWidth + 100.0f; updateGutterWidth(); updateScrollBars();
