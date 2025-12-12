@@ -350,7 +350,10 @@ struct Editor {
                 if (found) {
                     const char* newlinePtr = (const char*)found;
                     size_t offsetInPiece = newlinePtr - buf;
-                    lineStarts.push_back(globalOffset + offsetInPiece + 1);
+                    size_t nextLineStart = globalOffset + offsetInPiece + 1;
+                    size_t currentLineLen = nextLineStart - lineStarts.back();
+                    if (currentLineLen > maxBytes) maxBytes = currentLineLen;
+                    lineStarts.push_back(nextLineStart);
                     ptr = newlinePtr + 1;
                 }
                 else {
@@ -359,11 +362,14 @@ struct Editor {
             }
             globalOffset += p.len;
         }
-        for (size_t i = 0; i < lineStarts.size(); ++i) {
-            size_t s = lineStarts[i]; size_t e = (i + 1 < lineStarts.size()) ? lineStarts[i + 1] : totalLen;
-            size_t lineLen = e - s; if (lineLen > maxBytes) maxBytes = lineLen;
+        size_t lastStart = lineStarts.back();
+        if (lastStart < totalLen) {
+            size_t lastLineLen = totalLen - lastStart;
+            if (lastLineLen > maxBytes) maxBytes = lastLineLen;
         }
-        maxLineWidth = maxBytes * charWidth + 100.0f; updateGutterWidth(); updateScrollBars();
+        maxLineWidth = maxBytes * charWidth + 100.0f;
+        updateGutterWidth();
+        updateScrollBars();
     }
     int getLineIdx(size_t pos) {
         if (lineStarts.empty()) return 0;
