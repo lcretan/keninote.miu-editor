@@ -2148,7 +2148,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
-    WNDCLASS wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"miu"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClass(&wc);
+    WNDCLASS wc = { 0 }; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = L"miu"; wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)); wc.hCursor = LoadCursor(NULL, IDC_IBEAM); RegisterClass(&wc);
     HDC hdc = GetDC(NULL);
     int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
@@ -2176,13 +2176,13 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
                 InvalidateRect(hwnd, NULL, FALSE);
                 continue;
             }
-            if (msg.wParam == VK_F11) {
-                g_editor.toggleFullScreen();
-                continue;
-            }
             if (msg.wParam == VK_F3) {
                 bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
                 g_editor.findNext(!shift);
+                continue;
+            }
+            if (msg.wParam == VK_F11) {
+                g_editor.toggleFullScreen();
                 continue;
             }
             if (GetKeyState(VK_CONTROL) & 0x8000) {
