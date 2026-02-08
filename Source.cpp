@@ -9,6 +9,8 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <imm.h>
 #include <commdlg.h>
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <string>
 #include <vector>
 #include <memory>
@@ -27,6 +29,8 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 const std::wstring APP_VERSION = L"miu v1.0.9";
 
@@ -228,6 +232,53 @@ struct Editor {
     WINDOWPLACEMENT prevPlacement = { sizeof(WINDOWPLACEMENT) };
     std::wstring helpTextStr;
     D2D1::ColorF autoHlColor = D2D1::ColorF(0.8f, 0.8f, 0.8f, 0.35f);
+    D2D1::ColorF caretColor = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
+    bool isDarkMode = false;
+    bool checkSystemDarkMode() {
+        HKEY hKey;
+        DWORD val = 1;
+        DWORD size = sizeof(DWORD);
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (LPBYTE)&val, &size);
+            RegCloseKey(hKey);
+        }
+        return (val == 0);
+    }
+    void updateThemeColors() {
+        isDarkMode = checkSystemDarkMode();
+        if (isDarkMode) {
+            background = D2D1::ColorF(0.12f, 0.12f, 0.12f, 1.0f);
+            textColor = D2D1::ColorF(0.9f, 0.9f, 0.9f, 1.0f);
+            gutterBg = D2D1::ColorF(0.18f, 0.18f, 0.18f, 1.0f);
+            gutterText = D2D1::ColorF(0.5f, 0.5f, 0.5f, 1.0f);
+            selColor = D2D1::ColorF(0.26f, 0.4f, 0.6f, 1.0f);
+            highlightColor = D2D1::ColorF(0.4f, 0.4f, 0.0f, 0.6f);
+            autoHlColor = D2D1::ColorF(0.35f, 0.35f, 0.35f, 0.6f);
+            caretColor = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+        else {
+            background = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+            textColor = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
+            gutterBg = D2D1::ColorF(0.95f, 0.95f, 0.95f, 1.0f);
+            gutterText = D2D1::ColorF(0.6f, 0.6f, 0.6f, 1.0f);
+            selColor = D2D1::ColorF(0.7f, 0.8f, 1.0f, 1.0f);
+            highlightColor = D2D1::ColorF(1.0f, 1.0f, 0.0f, 0.4f);
+            autoHlColor = D2D1::ColorF(0.8f, 0.8f, 0.8f, 0.35f);
+            caretColor = D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+        BOOL dark = isDarkMode;
+        DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+        if (isDarkMode) {
+            SetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
+        }
+        else {
+            SetWindowTheme(hwnd, L"Explorer", NULL);
+        }
+        if (hwnd) {
+            SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+    }
     std::pair<std::string, bool> getHighlightTarget() {
         if (cursors.empty()) return { "", false };
         const Cursor& c = cursors.back();
@@ -270,6 +321,7 @@ struct Editor {
         float dashes[] = { 2.0f, 2.0f }; D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_LINE_JOIN_MITER, 10.0f, D2D1_DASH_STYLE_CUSTOM, 0.0f); d2dFactory->CreateStrokeStyle(&props, dashes, 2, &dotStyle);
         D2D1_STROKE_STYLE_PROPERTIES roundProps = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f); d2dFactory->CreateStrokeStyle(&roundProps, nullptr, 0, &roundJoinStyle);
         cfMsDevCol = RegisterClipboardFormatW(L"MSDEVColumnSelect");
+        updateThemeColors();
         updateFont(currentFontSize); rebuildLineStarts(); cursors.push_back({ 0, 0, 0.0f }); updateTitleBar();
     }
     void updateFont(float size) {
@@ -973,7 +1025,7 @@ struct Editor {
         float imeCx = 0, imeCy = 0;
         if (SUCCEEDED(hr) && layout) {
             ID2D1SolidColorBrush* selBrush = nullptr; rend->CreateSolidColorBrush(selColor, &selBrush);
-            ID2D1SolidColorBrush* caretBrush = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), &caretBrush);
+            ID2D1SolidColorBrush* caretBrush = nullptr; rend->CreateSolidColorBrush(caretColor, &caretBrush);
             ID2D1SolidColorBrush* hlBrush = nullptr; rend->CreateSolidColorBrush(highlightColor, &hlBrush);
             ID2D1SolidColorBrush* autoHlBrush = nullptr;
             rend->CreateSolidColorBrush(autoHlColor, &autoHlBrush);
@@ -1809,6 +1861,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_editor.initGraphics(hwnd);
         DragAcceptFiles(hwnd, TRUE);
         break;
+    case WM_SETTINGCHANGE: {
+        if (lParam && wcscmp((LPCWSTR)lParam, L"ImmersiveColorSet") == 0) {
+            g_editor.updateThemeColors();
+        }
+        break;
+    }
     case WM_SIZE: if (g_editor.rend) { RECT rc; GetClientRect(hwnd, &rc); g_editor.rend->Resize(D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)); g_editor.updateScrollBars(); InvalidateRect(hwnd, NULL, FALSE); } break;
     case WM_LBUTTONDOWN: {
         if (g_editor.showHelpPopup) { g_editor.showHelpPopup = false; InvalidateRect(hwnd, NULL, FALSE); }
