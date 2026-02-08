@@ -214,7 +214,7 @@ struct Editor {
     int vScrollPos = 0; int hScrollPos = 0; std::vector<size_t> lineStarts;
     float maxLineWidth = 100.0f; float gutterWidth = 50.0f;
     DWORD lastClickTime = 0; int clickCount = 0; int lastClickX = 0, lastClickY = 0;
-    float currentFontSize = 21.0f; DWORD zoomPopupEndTime = 0; std::wstring zoomPopupText;
+    float currentFontSize = 21.0f; DWORD64 zoomPopupEndTime = 0; std::wstring zoomPopupText;
     bool suppressUI = false;
     ID2D1Factory* d2dFactory = nullptr; ID2D1HwndRenderTarget* rend = nullptr;
     IDWriteFactory* dwFactory = nullptr; IDWriteTextFormat* textFormat = nullptr; IDWriteTextFormat* popupTextFormat = nullptr;
@@ -1134,8 +1134,22 @@ struct Editor {
             }
         }
         gutterTextBrush->Release();
-        HIMC hIMC = ImmGetContext(hwnd); if (hIMC) { COMPOSITIONFORM cf = {}; cf.dwStyle = CFS_POINT; cf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cf.ptCurrentPos.y = (LONG)imeCy; ImmSetCompositionWindow(hIMC, &cf); CANDIDATEFORM cdf = {}; cdf.dwIndex = 0; cdf.dwStyle = CFS_CANDIDATEPOS; cdf.ptCurrentPos.x = (LONG)(imeCx + gutterWidth - hScrollPos); cdf.ptCurrentPos.y = (LONG)(imeCy + lineHeight); ImmSetCandidateWindow(hIMC, &cdf); ImmReleaseContext(hwnd, hIMC); }
-        if (GetTickCount() < zoomPopupEndTime) {
+        HIMC hIMC = ImmGetContext(hwnd);
+        if (hIMC) {
+            COMPOSITIONFORM cf = {};
+            cf.dwStyle = CFS_POINT;
+            cf.ptCurrentPos.x = (LONG)((imeCx + gutterWidth - hScrollPos) * dpiScaleX);
+            cf.ptCurrentPos.y = (LONG)(imeCy * dpiScaleY);
+            ImmSetCompositionWindow(hIMC, &cf);
+            CANDIDATEFORM cdf = {};
+            cdf.dwIndex = 0;
+            cdf.dwStyle = CFS_CANDIDATEPOS;
+            cdf.ptCurrentPos.x = (LONG)((imeCx + gutterWidth - hScrollPos) * dpiScaleX);
+            cdf.ptCurrentPos.y = (LONG)((imeCy + lineHeight) * dpiScaleY);
+            ImmSetCandidateWindow(hIMC, &cdf);
+            ImmReleaseContext(hwnd, hIMC);
+        }
+        if (GetTickCount64() < zoomPopupEndTime) {
             D2D1_RECT_F popupRect = D2D1::RectF(clientW / 2 - 80, clientH / 2 - 40, clientW / 2 + 80, clientH / 2 + 40);
             ID2D1SolidColorBrush* popupBg = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.7f), &popupBg);
             ID2D1SolidColorBrush* popupText = nullptr; rend->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &popupText);
@@ -1868,7 +1882,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEWHEEL:
         if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
             float s = (GET_WHEEL_DELTA_WPARAM(wParam) > 0) ? 1.1f : 0.9f; g_editor.updateFont(g_editor.currentFontSize * s);
-            g_editor.zoomPopupEndTime = GetTickCount() + 1000; std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str(); SetTimer(hwnd, 1, 1000, NULL);
+            g_editor.zoomPopupEndTime = GetTickCount64() + 1000; std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str(); SetTimer(hwnd, 1, 1000, NULL);
         }
         else {
             g_editor.vScrollPos -= GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * 3;
@@ -1973,7 +1987,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             case 'A': { g_editor.rollbackPadding(); g_editor.cursors.clear(); g_editor.cursors.push_back({ g_editor.pt.length(), 0, 0.0f }); InvalidateRect(hwnd, NULL, FALSE); return 0; }
             case VK_ADD: case VK_OEM_PLUS: {
                 g_editor.updateFont(g_editor.currentFontSize * 1.1f);
-                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                g_editor.zoomPopupEndTime = GetTickCount64() + 1000;
                 std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
                 SetTimer(hwnd, 1, 1000, NULL);
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -1981,7 +1995,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             case VK_SUBTRACT: case VK_OEM_MINUS: {
                 g_editor.updateFont(g_editor.currentFontSize * 0.9f);
-                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                g_editor.zoomPopupEndTime = GetTickCount64() + 1000;
                 std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
                 SetTimer(hwnd, 1, 1000, NULL);
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -1989,7 +2003,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             case '0': case VK_NUMPAD0: {
                 g_editor.updateFont(21.0f);
-                g_editor.zoomPopupEndTime = GetTickCount() + 1000;
+                g_editor.zoomPopupEndTime = GetTickCount64() + 1000;
                 std::wstringstream ss; ss << (int)g_editor.currentFontSize << L"px"; g_editor.zoomPopupText = ss.str();
                 SetTimer(hwnd, 1, 1000, NULL);
                 InvalidateRect(hwnd, NULL, FALSE);
