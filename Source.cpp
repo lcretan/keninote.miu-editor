@@ -1532,8 +1532,7 @@ struct Editor {
                     DWRITE_HIT_TEST_METRICS m; FLOAT px, py;
                     layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m);
                     px = std::round(px);
-                    if (px < 0.0f) px = 0.0f;
-                    rend->FillRectangle(D2D1::RectF(px, py, px + 1.0f, py + lineHeight), caretBrush);
+                    rend->FillRectangle(D2D1::RectF(px, py, px + 2.0f, py + lineHeight), caretBrush);
                 }
             }
             for (const auto& cursor : cursors) {
@@ -1544,14 +1543,13 @@ struct Editor {
                     DWRITE_HIT_TEST_METRICS m; FLOAT px, py;
                     layout->HitTestTextPosition((UINT32)wBefore.size(), FALSE, &px, &py, &m);
                     px = std::round(px);
-                    if (px < 0.0f) px = 0.0f;
                     if (isOverwriteMode) {
                         float cw = m.width;
                         if (cw == 0) cw = charWidth;
                         rend->FillRectangle(D2D1::RectF(px, py, px + cw, py + lineHeight), caretBrush);
                     }
                     else {
-                        rend->FillRectangle(D2D1::RectF(px, py, px + 1.0f, py + lineHeight), caretBrush);
+                        rend->FillRectangle(D2D1::RectF(px, py, px + 2.0f, py + lineHeight), caretBrush);
                     }
                     if (&cursor == &cursors.back()) { imeCx = px; imeCy = py; }
                 }
