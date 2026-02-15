@@ -1009,7 +1009,7 @@ struct Editor {
                 }
             }
             if (match) {
-                replacement = UnescapeString(replaceQuery, newlineStr);
+                replacement = replaceQuery;
             }
         }
         if (match) {
@@ -1039,8 +1039,8 @@ struct Editor {
         size_t currentPos = 0;
         size_t docLen = pt.length();
         std::string actualQuery = searchQuery;
-        if (searchRegex) actualQuery = preprocessRegexQuery(searchQuery);
         if (searchRegex) {
+            actualQuery = preprocessRegexQuery(searchQuery);
             std::string fullText = pt.getRange(0, docLen);
             std::string fmt = UnescapeString(replaceQuery, newlineStr);
             try {
@@ -1067,12 +1067,11 @@ struct Editor {
             catch (...) { return; }
         }
         else {
-            std::string unescapedReplace = UnescapeString(replaceQuery, newlineStr);
             while (true) {
                 size_t matchLen = 0;
                 size_t pos = findText(currentPos, searchQuery, true, searchMatchCase, searchWholeWord, false, &matchLen);
                 if (pos == std::string::npos || pos < currentPos) break;
-                matches.push_back({ pos, matchLen, unescapedReplace });
+                matches.push_back({ pos, matchLen, replaceQuery });
                 currentPos = pos + matchLen;
                 if (currentPos > docLen) break;
             }
@@ -1081,10 +1080,6 @@ struct Editor {
         commitPadding();
         EditBatch batch;
         batch.beforeCursors = cursors;
-        size_t lastMatchNewPos = 0;
-        size_t lastMatchNewLen = 0;
-        long long totalOffset = 0;
-        std::vector<Match> sortedMatches = matches;
         for (auto it = matches.rbegin(); it != matches.rend(); ++it) {
             size_t start = it->start;
             size_t len = it->len;
