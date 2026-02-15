@@ -1213,7 +1213,6 @@ UwBJAE4ARwBMAEUAXwBFAFgARQBfAEkATQBBAEcARQABAE0AZQBkAGkAYQA=
 		<row><td>IS_SQLSERVER_PASSWORD</td><td/><td/></row>
 		<row><td>IS_SQLSERVER_SERVER</td><td/><td/></row>
 		<row><td>IS_SQLSERVER_USERNAME</td><td>sa</td><td/></row>
-		<row><td>Manufacturer</td><td>kenji</td><td/></row>
 		<row><td>PROGMSG_IIS_CREATEAPPPOOL</td><td>##IDS_PROGMSG_IIS_CREATEAPPPOOL##</td><td/></row>
 		<row><td>PROGMSG_IIS_CREATEAPPPOOLS</td><td>##IDS_PROGMSG_IIS_CREATEAPPPOOLS##</td><td/></row>
 		<row><td>PROGMSG_IIS_CREATEVROOT</td><td>##IDS_PROGMSG_IIS_CREATEVROOT##</td><td/></row>
