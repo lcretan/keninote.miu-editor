@@ -133,13 +133,13 @@ static std::string WToUTF8(const std::wstring& w) {
     WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, NULL, NULL);
     return s;
 }
-static std::string UnescapeString(const std::string& s) {
+static std::string UnescapeString(const std::string& s, const std::string& newline) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '\\' && i + 1 < s.size()) {
             switch (s[i + 1]) {
-            case 'n': out += '\n'; break;
+            case 'n': out += newline; break;
             case 'r': out += '\r'; break;
             case 't': out += '\t'; break;
             case '\\': out += '\\'; break;
@@ -990,7 +990,7 @@ struct Editor {
                     }
                 }
                 if (match) {
-                    std::string fmt = UnescapeString(replaceQuery);
+                    std::string fmt = UnescapeString(replaceQuery, newlineStr);
                     replacement = m.format(fmt);
                 }
             }
@@ -1001,14 +1001,32 @@ struct Editor {
                 match = true;
                 for (size_t i = 0; i < len; ++i) {
                     char c1 = selText[i]; char c2 = searchQuery[i];
-                    if (!searchMatchCase) { c1 = (c1 >= 'A' && c1 <= 'Z') ? c1 + ('a' - 'A') : c1; c2 = (c2 >= 'A' && c2 <= 'Z') ? c2 + ('a' - 'A') : c2; }
+                    if (!searchMatchCase) {
+                        c1 = (c1 >= 'A' && c1 <= 'Z') ? c1 + ('a' - 'A') : c1;
+                        c2 = (c2 >= 'A' && c2 <= 'Z') ? c2 + ('a' - 'A') : c2;
+                    }
                     if (c1 != c2) { match = false; break; }
                 }
             }
+            if (match) {
+                replacement = UnescapeString(replaceQuery, newlineStr);
+            }
         }
         if (match) {
-            insertAtCursors(replacement);
-            findNext(true);
+            commitPadding();
+            EditBatch batch;
+            batch.beforeCursors = cursors;
+            pt.erase(start, len);
+            batch.ops.push_back({ EditOp::Erase, start, selText });
+            pt.insert(start, replacement);
+            batch.ops.push_back({ EditOp::Insert, start, replacement });
+            cursors.clear();
+            cursors.push_back({ start + replacement.size(), start, getXFromPos(start + replacement.size()) });
+            batch.afterCursors = cursors;
+            undo.push(batch);
+            rebuildLineStarts();
+            ensureCaretVisible();
+            updateDirtyFlag();
         }
         else {
             findNext(true);
@@ -1024,7 +1042,7 @@ struct Editor {
         if (searchRegex) actualQuery = preprocessRegexQuery(searchQuery);
         if (searchRegex) {
             std::string fullText = pt.getRange(0, docLen);
-            std::string fmt = UnescapeString(replaceQuery);
+            std::string fmt = UnescapeString(replaceQuery, newlineStr);
             try {
                 std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
                 if (!searchMatchCase) flags |= std::regex_constants::icase;
@@ -1041,10 +1059,7 @@ struct Editor {
                         size_t adj = 0;
                         if (matchStr.size() >= 2 && matchStr[0] == '\r' && matchStr[1] == '\n') adj = 2;
                         else if (matchStr.size() >= 1 && (matchStr[0] == '\n' || matchStr[0] == '\r')) adj = 1;
-                        if (adj > 0) {
-                            pos += adj;
-                            len -= adj;
-                        }
+                        if (adj > 0) { pos += adj; len -= adj; }
                     }
                     matches.push_back({ pos, len, rText });
                 }
@@ -1052,11 +1067,12 @@ struct Editor {
             catch (...) { return; }
         }
         else {
+            std::string unescapedReplace = UnescapeString(replaceQuery, newlineStr);
             while (true) {
                 size_t matchLen = 0;
                 size_t pos = findText(currentPos, searchQuery, true, searchMatchCase, searchWholeWord, false, &matchLen);
                 if (pos == std::string::npos || pos < currentPos) break;
-                matches.push_back({ pos, matchLen, replaceQuery });
+                matches.push_back({ pos, matchLen, unescapedReplace });
                 currentPos = pos + matchLen;
                 if (currentPos > docLen) break;
             }
@@ -1065,6 +1081,10 @@ struct Editor {
         commitPadding();
         EditBatch batch;
         batch.beforeCursors = cursors;
+        size_t lastMatchNewPos = 0;
+        size_t lastMatchNewLen = 0;
+        long long totalOffset = 0;
+        std::vector<Match> sortedMatches = matches;
         for (auto it = matches.rbegin(); it != matches.rend(); ++it) {
             size_t start = it->start;
             size_t len = it->len;
@@ -1074,11 +1094,19 @@ struct Editor {
             pt.insert(start, it->replacementText);
             batch.ops.push_back({ EditOp::Insert, start, it->replacementText });
         }
+        size_t finalMatchIdx = matches.size() - 1;
+        long long offsetBeforeFinal = 0;
+        for (size_t i = 0; i < finalMatchIdx; ++i) {
+            offsetBeforeFinal += (long long)matches[i].replacementText.size() - (long long)matches[i].len;
+        }
+        size_t lastReplaceStart = (size_t)((long long)matches.back().start + offsetBeforeFinal);
+        size_t lastReplaceEnd = lastReplaceStart + matches.back().replacementText.size();
         cursors.clear();
-        cursors.push_back({ 0, 0, 0.0f });
+        cursors.push_back({ lastReplaceEnd, lastReplaceStart, getXFromPos(lastReplaceEnd) });
         batch.afterCursors = cursors;
         undo.push(batch);
         rebuildLineStarts();
+        ensureCaretVisible();
         updateDirtyFlag();
         InvalidateRect(hwnd, NULL, FALSE);
         ShowTaskDialog(
